@@ -249,3 +249,12 @@ CREATE INDEX IF NOT EXISTS asset_import_batch_items_batch ON asset_import_batch_
 ALTER TABLE users ADD COLUMN IF NOT EXISTS oidc_subject text;
 CREATE UNIQUE INDEX IF NOT EXISTS users_oidc_subject_unique ON users(oidc_subject) WHERE oidc_subject IS NOT NULL;
 CREATE INDEX IF NOT EXISTS memberships_org_role ON memberships(org_id,role);
+
+-- Separate market valuation from accounting/book value
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS market_value numeric(14,2);
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS market_value_source text;
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS market_value_method text;
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS market_value_notes text;
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS market_value_updated_at timestamptz;
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS market_value_updated_by uuid REFERENCES users(id);
+CREATE INDEX IF NOT EXISTS assets_org_market_value ON assets(org_id, market_value);
