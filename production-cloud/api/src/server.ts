@@ -486,6 +486,28 @@ app.get('/v1/dashboard/valuation',async(req,res)=>{
     return {currency:'SAR',categories:rows.rows,total:total.rows[0],marketValueByCategory:categoryMarket.rows};
   }catch{return res.code(500).send({error:'valuation dashboard failed'})}
 });
+app.get('/v1/assets/:id/valuation-history',async(req,res)=>{
+  const p=req.params as {id:string};const q=req.query as {orgId?:string};
+  if(!q.orgId||!z.string().uuid().safeParse(q.orgId).success||!z.string().uuid().safeParse(p.id).success)return res.code(400).send({error:'invalid asset or orgId'});
+  const r=await pool.query(`SELECT * FROM asset_valuations WHERE asset_id=$1 AND org_id=$2 ORDER BY created_at DESC`,[p.id,q.orgId]);return r.rows;
+});
+app.post('/v1/assets/:id/valuation',async(req,res)=>{
+  const p=req.params as {id:string};const body=z.object({orgId:z.string().uuid(),conditionFactor:z.number().min(0).max(2).default(1),ageFactor:z.number().min(0).max(2).default(1),brandModelFactor:z.number().min(0).max(2).default(1),comparableValue:z.number().nonnegative().nullable().default(null),confidence:z.number().min(0).max(100).default(50),method:z.string().max(100).default('configured_rules'),notes:z.string().max(4000).optional()}).safeParse(req.body);
+  if(!body.success)return res.code(400).send({error:body.error.flatten()});
+  const auth=req.auth as AuthContext;if(!requireRole(auth,['owner','admin','asset_manager','approver'],res))return;
+  const a=await pool.query(`SELECT cost,salvage_value,useful_life_years,depreciation_method,purchase_date,condition FROM assets WHERE id=$1 AND org_id=$2`,[p.id,body.data.orgId]);
+  if(!a.rowCount)return res.code(404).send({error:'asset not found'});
+  const x=a.rows[0], years=Math.max(Number(((Date.now()-new Date(x.purchase_date).getTime())/(365.25*86400000)).toFixed(4)),0);
+  const dep=x.depreciation_method==='straight_line'?Math.min(Math.max(years/Math.max(Number(x.useful_life_years||1),1),0),1)*Math.max(Number(x.cost)-Number(x.salvage_value||0),0):0;
+  const book=Math.max(Number(x.cost)-dep,0), ruleBase=Number(body.data.comparableValue??x.cost), estimated=Math.max(ruleBase*body.data.conditionFactor*body.data.ageFactor*body.data.brandModelFactor,0);
+  const status=auth.role==='approver'||auth.role==='owner'||auth.role==='admin'?'approved':'pending_approval';
+  const approved=status==='approved';
+  const r=await pool.query(`INSERT INTO asset_valuations(org_id,asset_id,original_cost,depreciation_amount,book_value,base_market_value,condition_factor,age_factor,brand_model_factor,comparable_value,estimated_market_value,confidence,status,valuation_method,notes,created_by,approved_by,approved_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,CASE WHEN $18 THEN now() END) RETURNING *`,
+    [body.data.orgId,p.id,x.cost,dep,book,ruleBase,body.data.conditionFactor,body.data.ageFactor,body.data.brandModelFactor,body.data.comparableValue,estimated,body.data.confidence,status,body.data.method,body.data.notes||null,auth.userId,approved?auth.userId:null,approved]);
+  await audit({orgId:body.data.orgId,actorId:auth.userId,action:'asset.valuation_created',entity:'asset_valuation',entityId:r.rows[0].id,metadata:{assetId:p.id,estimatedMarketValue:estimated,confidence:body.data.confidence,status}});
+  if(approved) await pool.query(`UPDATE assets SET market_value=$1,market_value_source='rule',market_value_method=$2,market_value_notes=$3,market_value_updated_at=now(),market_value_updated_by=$4 WHERE id=$5 AND org_id=$6`,[estimated,body.data.method,body.data.notes||null,auth.userId,p.id,body.data.orgId]);
+  return r.rows[0];
+});
 app.get('/v1/assets/:id/valuation',async(req,res)=>{
   const p=req.params as {id:string};const q=req.query as {orgId?:string};
   if(!q.orgId||!z.string().uuid().safeParse(q.orgId).success||!z.string().uuid().safeParse(p.id).success)return res.code(400).send({error:'invalid asset or orgId'});
