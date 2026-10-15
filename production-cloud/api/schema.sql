@@ -1,0 +1,9 @@
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE TABLE IF NOT EXISTS organizations(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),name text NOT NULL,created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS users(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),email text UNIQUE NOT NULL,display_name text NOT NULL,created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS memberships(user_id uuid REFERENCES users(id),org_id uuid REFERENCES organizations(id),role text NOT NULL CHECK(role IN ('owner','admin','asset_manager','auditor','approver','viewer')),PRIMARY KEY(user_id,org_id));
+CREATE TABLE IF NOT EXISTS assets(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),org_id uuid NOT NULL REFERENCES organizations(id),tag text NOT NULL,serial text,asset_name text NOT NULL,cost numeric(18,2) NOT NULL DEFAULT 0,status text NOT NULL DEFAULT 'Active',created_at timestamptz NOT NULL DEFAULT now(),UNIQUE(org_id,tag));
+CREATE TABLE IF NOT EXISTS audit_events(sequence bigserial PRIMARY KEY,org_id uuid NOT NULL REFERENCES organizations(id),actor_id uuid,action text NOT NULL,entity text NOT NULL,entity_id text NOT NULL,metadata jsonb NOT NULL DEFAULT '{}',previous_hash text NOT NULL,hash text NOT NULL,created_at timestamptz NOT NULL DEFAULT now());
+CREATE INDEX IF NOT EXISTS audit_org_sequence ON audit_events(org_id,sequence);
+CREATE TABLE IF NOT EXISTS attachments(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),org_id uuid NOT NULL REFERENCES organizations(id),asset_id uuid REFERENCES assets(id),object_key text NOT NULL,content_type text,created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS notifications(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),org_id uuid NOT NULL REFERENCES organizations(id),user_id uuid,title text NOT NULL,body text NOT NULL,read_at timestamptz,created_at timestamptz NOT NULL DEFAULT now());
