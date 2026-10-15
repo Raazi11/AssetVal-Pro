@@ -258,3 +258,31 @@ ALTER TABLE assets ADD COLUMN IF NOT EXISTS market_value_notes text;
 ALTER TABLE assets ADD COLUMN IF NOT EXISTS market_value_updated_at timestamptz;
 ALTER TABLE assets ADD COLUMN IF NOT EXISTS market_value_updated_by uuid REFERENCES users(id);
 CREATE INDEX IF NOT EXISTS assets_org_market_value ON assets(org_id, market_value);
+
+-- Asset Valuation Engine v1.5
+CREATE TABLE IF NOT EXISTS asset_valuation_rules(
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), org_id uuid REFERENCES organizations(id) ON DELETE CASCADE,
+  category_id uuid REFERENCES asset_categories(id) ON DELETE SET NULL, name text NOT NULL,
+  condition_factor numeric(8,4) NOT NULL DEFAULT 1, age_factor_per_year numeric(8,4) NOT NULL DEFAULT 0.05,
+  brand_factor numeric(8,4) NOT NULL DEFAULT 1, max_age_years numeric(8,2),
+  active boolean NOT NULL DEFAULT true, created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS asset_comparables(
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), org_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  asset_id uuid NOT NULL REFERENCES assets(id) ON DELETE CASCADE, source text NOT NULL, description text,
+  observed_price numeric(14,2) NOT NULL, observed_at date NOT NULL DEFAULT current_date,
+  similarity_score numeric(6,4), notes text, created_by uuid REFERENCES users(id), created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS asset_valuations(
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), org_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  asset_id uuid NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+  original_cost numeric(14,2) NOT NULL, depreciation_amount numeric(14,2) NOT NULL DEFAULT 0,
+  book_value numeric(14,2) NOT NULL, base_market_value numeric(14,2),
+  condition_factor numeric(8,4), age_factor numeric(8,4), brand_model_factor numeric(8,4),
+  comparable_value numeric(14,2), estimated_market_value numeric(14,2),
+  confidence numeric(5,2), status text NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','pending_approval','approved','rejected')),
+  valuation_method text, notes text, created_by uuid REFERENCES users(id), approved_by uuid REFERENCES users(id),
+  created_at timestamptz NOT NULL DEFAULT now(), approved_at timestamptz
+);
+CREATE INDEX IF NOT EXISTS asset_valuations_asset_created ON asset_valuations(asset_id,created_at DESC);
+CREATE INDEX IF NOT EXISTS asset_comparables_asset ON asset_comparables(asset_id,observed_at DESC);
