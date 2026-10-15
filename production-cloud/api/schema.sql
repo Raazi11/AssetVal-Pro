@@ -244,3 +244,8 @@ CREATE TABLE IF NOT EXISTS asset_import_batch_items(
   created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS asset_import_batch_items_batch ON asset_import_batch_items(batch_id,row_number);
+
+-- Production OIDC / RBAC identity binding
+ALTER TABLE users ADD COLUMN IF NOT EXISTS oidc_subject text;
+CREATE UNIQUE INDEX IF NOT EXISTS users_oidc_subject_unique ON users(oidc_subject) WHERE oidc_subject IS NOT NULL;
+CREATE INDEX IF NOT EXISTS memberships_org_role ON memberships(org_id,role);
