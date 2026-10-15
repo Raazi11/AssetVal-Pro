@@ -289,6 +289,77 @@ async function validateBulk(orgId:string,rawRows:any[]){
   }
   return results;
 }
+
+// Smart import history, preview, error export and rollback
+const smartImport=z.object({orgId:z.string().uuid(),mapping:z.record(z.string()),rows:z.array(z.record(z.any())).max(10000),fileName:z.string().max(255).optional()});
+function mapSmartRows(body:any){
+  return body.rows.map((r:any,i:number)=>({
+    rowNumber:i+2,
+    assetId:String(r[body.mapping.assetId]??'').trim(),
+    name:String(r[body.mapping.name]??'').trim(),
+    category:String(r[body.mapping.category]??'').trim(),
+    brand:String(r[body.mapping.brand]??'').trim(),
+    model:String(r[body.mapping.model]??'').trim(),
+    serial:String(r[body.mapping.serial]??'').trim(),
+    location:String(r[body.mapping.location]??'').trim(),
+    department:String(r[body.mapping.department]??'').trim(),
+    purchaseDate:String(r[body.mapping.purchaseDate]??'').trim(),
+    cost:r[body.mapping.cost]??'',
+    condition:String(r[body.mapping.condition]??'Good').trim()
+  }));
+}
+app.post('/v1/import/smart/validate',async(req,res)=>{
+  const body=smartImport.safeParse(req.body);if(!body.success)return res.code(400).send({error:body.error.flatten()});
+  try{
+    const rows=await validateBulk(body.data.orgId,mapSmartRows(body.data));
+    return {fileName:body.data.fileName||null,total:rows.length,valid:rows.filter(x=>x.valid).length,invalid:rows.filter(x=>!x.valid).length,rows};
+  }catch{return res.code(500).send({error:'smart import validation failed'})}
+});
+app.post('/v1/import/smart/commit',async(req,res)=>{
+  const body=smartImport.safeParse(req.body);if(!body.success)return res.code(400).send({error:body.error.flatten()});
+  const mapped=mapSmartRows(body.data),rows=await validateBulk(body.data.orgId,mapped);
+  if(rows.some(x=>!x.valid))return res.code(422).send({error:'Fix validation errors before importing',rows});
+  const batchId='IMP-'+Date.now()+'-'+Math.random().toString(36).slice(2,8).toUpperCase();
+  const client=await pool.connect();let imported=0;const assetIds:string[]=[];
+  try{
+    await client.query('BEGIN');
+    for(const row of rows){
+      let tag=row.assetId;
+      if(!tag)tag='AST-GEN-'+String(Date.now()+imported).slice(-9);
+      const r=await client.query(\`INSERT INTO assets(org_id,tag,asset_name,serial,category_id,location_id,department_id,model,brand,cost,purchase_date,condition,status)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'Active') RETURNING id\`,
+        [body.data.orgId,tag,row.name,row.serial||null,row.categoryId,row.locationId,row.departmentId,row.model||null,row.brand||null,row.cost,row.purchaseDate,row.condition]);
+      assetIds.push(r.rows[0].id);imported++;
+    }
+    await client.query(\`INSERT INTO asset_import_batches(id,org_id,file_name,total_rows,imported_rows,error_rows,status,asset_ids)
+      VALUES($1,$2,$3,$4,$5,0,'completed',$6::jsonb)\`,
+      [batchId,body.data.orgId,body.data.fileName||null,rows.length,imported,JSON.stringify(assetIds)]);
+    await client.query('COMMIT');
+    await audit({orgId:body.data.orgId,actorId:null,action:'asset.import_batch_completed',entity:'asset_import_batch',entityId:batchId,metadata:{fileName:body.data.fileName||null,imported,total:rows.length}});
+    return {batchId,imported,total:rows.length};
+  }catch(e){await client.query('ROLLBACK');return res.code(409).send({error:e instanceof Error?e.message:'smart import failed'})}finally{client.release()}
+});
+app.get('/v1/import/history',async(req,res)=>{
+  const q=req.query as {orgId?:string};if(!q.orgId)return res.code(400).send({error:'orgId required'});
+  const r=await pool.query(\`SELECT id,file_name AS "fileName",total_rows AS "totalRows",imported_rows AS "importedRows",error_rows AS "errorRows",status,created_at AS "createdAt",rolled_back_at AS "rolledBackAt" FROM asset_import_batches WHERE org_id=$1 ORDER BY created_at DESC\`,[q.orgId]);
+  return r.rows;
+});
+app.post('/v1/import/history/:id/rollback',async(req,res)=>{
+  const p=req.params as {id:string};const q=req.query as {orgId?:string};if(!q.orgId)return res.code(400).send({error:'orgId required'});
+  const client=await pool.connect();
+  try{
+    await client.query('BEGIN');
+    const b=await client.query(\`SELECT id,asset_ids,status FROM asset_import_batches WHERE id=$1 AND org_id=$2 FOR UPDATE\`,[p.id,q.orgId]);
+    if(!b.rowCount)return res.code(404).send({error:'import batch not found'});
+    if(b.rows[0].status==='rolled_back')return res.code(409).send({error:'batch already rolled back'});
+    const ids=Array.isArray(b.rows[0].asset_ids)?b.rows[0].asset_ids:JSON.parse(b.rows[0].asset_ids||'[]');
+    await client.query(\`DELETE FROM assets WHERE org_id=$1 AND id = ANY($2::uuid[])\`,[q.orgId,ids]);
+    await client.query(\`UPDATE asset_import_batches SET status='rolled_back',rolled_back_at=now() WHERE id=$1\`,[p.id]);
+    await client.query('COMMIT');
+    await audit({orgId:q.orgId,actorId:null,action:'asset.import_batch_rolled_back',entity:'asset_import_batch',entityId:p.id,metadata:{deleted:ids.length}});
+    return {rolledBack:true,deleted:ids.length};
+  }catch(e){await client.query('ROLLBACK');return res.code(409).send({error:e instanceof Error?e.message:'rollback failed'})}finally{client.release()}
+});
 app.post('/v1/import/assets/validate',async(req,res)=>{
   const body=bulkRequest.safeParse(req.body); if(!body.success)return res.code(400).send({error:body.error.flatten()});
   try{
