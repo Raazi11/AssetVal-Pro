@@ -126,9 +126,9 @@ app.post('/v1/categories',async(req,res)=>{
   }catch{return res.code(409).send({error:'category could not be created; code may already exist'})}
 });
 const assetInput=z.object({
-  orgId:z.string().uuid(),tag:z.string().min(1).max(80),assetName:z.string().min(1).max(200),serial:z.string().max(160).nullable().default(null),
-  categoryId:z.string().uuid().nullable().default(null),locationId:z.string().uuid().nullable().default(null),custodianId:z.string().uuid().nullable().default(null),
-  vendorId:z.string().uuid().nullable().default(null),model:z.string().max(160).nullable().default(null),cost:z.coerce.number().nonnegative().default(0),
+  orgId:z.string().uuid(),tag:z.string().min(1).max(80).optional(),assetName:z.string().min(1).max(200),serial:z.string().max(160).nullable().default(null),
+  categoryId:z.string().uuid().nullable().default(null),brand:z.string().max(120).nullable().default(null),locationId:z.string().uuid().nullable().default(null),custodianId:z.string().uuid().nullable().default(null),
+  vendorId:z.string().uuid().nullable().default(null),model:z.string().max(160).nullable().default(null),condition:z.enum(['Excellent','Good','Fair','Poor','Damaged']).default('Good'),cost:z.coerce.number().nonnegative().default(0),
   usefulLifeYears:z.coerce.number().positive().default(5),salvageValue:z.coerce.number().nonnegative().default(0),
   depreciationMethod:z.enum(['straight_line','declining_balance','sum_of_years_digits']).default('straight_line'),purchaseDate:z.string().nullable().default(null),status:z.string().default('Active')
 });
@@ -147,15 +147,28 @@ app.get('/v1/assets',async(req,res)=>{
     return r.rows;
   }catch{return res.code(500).send({error:'asset query failed'})}
 });
+app.get('/v1/assets/:id',async(req,res)=>{
+  const p=req.params as {id:string}; const q=req.query as {orgId?:string};
+  if(!q.orgId || !z.string().uuid().safeParse(q.orgId).success || !z.string().uuid().safeParse(p.id).success)return res.code(400).send({error:'invalid asset or orgId'});
+  try{
+    const r=await pool.query(`SELECT a.*,a.asset_name AS "assetName",a.category_id AS "categoryId",c.name AS "categoryName",c.parent_id AS "categoryParentId",
+      l.name AS "locationName",cu.name AS "custodianName",v.name AS "vendorName"
+      FROM assets a LEFT JOIN asset_categories c ON c.id=a.category_id LEFT JOIN locations l ON l.id=a.location_id
+      LEFT JOIN custodians cu ON cu.id=a.custodian_id LEFT JOIN vendors v ON v.id=a.vendor_id
+      WHERE a.id=$1 AND a.org_id=$2`,[p.id,q.orgId]);
+    if(!r.rowCount)return res.code(404).send({error:'asset not found'}); return r.rows[0];
+  }catch{return res.code(500).send({error:'asset query failed'})}
+});
 app.post('/v1/assets',async(req,res)=>{
   const x=assetInput.safeParse(req.body); if(!x.success)return res.code(400).send({error:x.error.flatten()});
   const v=x.data;
   try{
+    const tag=v.tag || (await pool.query(`SELECT 'AST-' || upper(substr(coalesce(c.code,'GEN'),1,8)) || '-' || lpad((COUNT(a.id)+1)::text,5,'0') AS tag FROM asset_categories c LEFT JOIN assets a ON a.category_id=c.id WHERE c.id=$1 GROUP BY c.code`,[v.categoryId])).rows[0]?.tag || 'AST-GEN-00001';
     const r=await pool.query(`INSERT INTO assets(org_id,tag,asset_name,serial,category_id,location_id,custodian_id,vendor_id,model,cost,useful_life_years,salvage_value,depreciation_method,purchase_date,status)
       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
       RETURNING id,tag,asset_name AS "assetName",category_id AS "categoryId",location_id AS "locationId",custodian_id AS "custodianId",vendor_id AS "vendorId",cost,useful_life_years AS "usefulLifeYears",salvage_value AS "salvageValue",depreciation_method AS "depreciationMethod",purchase_date AS "purchaseDate",status`,
-      [v.orgId,v.tag,v.assetName,v.serial,v.categoryId,v.locationId,v.custodianId,v.vendorId,v.model,v.cost,v.usefulLifeYears,v.salvageValue,v.depreciationMethod,v.purchaseDate,v.status]);
-    await audit({orgId:v.orgId,actorId:null,action:'asset.created',entity:'asset',entityId:r.rows[0].id,metadata:{tag:v.tag,categoryId:v.categoryId,cost:v.cost}});
+      [v.orgId,tag,v.assetName,v.serial,v.categoryId,v.locationId,v.custodianId,v.vendorId,v.model,v.cost,v.usefulLifeYears,v.salvageValue,v.depreciationMethod,v.purchaseDate,v.status]);
+    await audit({orgId:v.orgId,actorId:null,action:'asset.created',entity:'asset',entityId:r.rows[0].id,metadata:{tag,categoryId:v.categoryId,cost:v.cost}});
     return res.code(201).send(r.rows[0]);
   }catch{return res.code(409).send({error:'asset could not be created; check references and unique tag'})}
 });
