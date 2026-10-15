@@ -187,3 +187,16 @@ CREATE TABLE IF NOT EXISTS notifications(
 -- All organization-owned records are linked through org_id. Application authorization
 -- must verify membership before every read/write; database RLS can be enabled when
 -- the deployment's connection-role/session-variable strategy is finalized.
+
+
+-- Standard subcategories
+INSERT INTO asset_categories(org_id,parent_id,code,name,is_system)
+SELECT NULL,p.id,v.code,v.name,true
+FROM asset_categories p
+JOIN (VALUES
+('IT','IT-LAP','Laptop'),('IT','IT-DESK','Desktop'),('IT','IT-MON','Monitor'),('IT','IT-SRV','Server'),('IT','IT-PRN','Printer'),('IT','IT-UPS','UPS'),('IT','IT-SW','Network switch'),('IT','IT-RT','Router'),
+('CCTV-ELV','CCTV-CAM','Camera'),('CCTV-ELV','CCTV-NVR','NVR/DVR'),('CCTV-ELV','CCTV-ACC','Access control'),('CCTV-ELV','CCTV-INT','Intercom'),('CCTV-ELV','CCTV-FIRE','Fire alarm'),('CCTV-ELV','CCTV-RACK','Rack'),
+('ELEC','ELEC-TV','TV'),('ELEC','ELEC-PROJ','Projector'),('ELEC','ELEC-DISP','Display'),('ELEC','ELEC-SOUND','Sound system'),
+('APP','APP-FRIDGE','Refrigerator'),('APP','APP-AC','Air conditioner'),('APP','APP-MICRO','Microwave'),('APP','APP-WASH','Washing machine')
+) AS v(parent_code,code,name) ON p.code=v.parent_code AND p.org_id IS NULL
+ON CONFLICT DO NOTHING;
