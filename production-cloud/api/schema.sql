@@ -286,3 +286,15 @@ CREATE TABLE IF NOT EXISTS asset_valuations(
 );
 CREATE INDEX IF NOT EXISTS asset_valuations_asset_created ON asset_valuations(asset_id,created_at DESC);
 CREATE INDEX IF NOT EXISTS asset_comparables_asset ON asset_comparables(asset_id,observed_at DESC);
+
+-- QR / Barcode Physical Audit v1.7
+CREATE TABLE IF NOT EXISTS asset_audit_scans(
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), org_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  asset_id uuid NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+  technician_id uuid REFERENCES users(id), scanned_at timestamptz NOT NULL DEFAULT now(),
+  serial_verified boolean NOT NULL DEFAULT false, location_verified boolean NOT NULL DEFAULT false,
+  condition text CHECK(condition IN ('Excellent','Good','Fair','Poor','Damaged','Scrap')),
+  comments text, photo_object_key text, photo_content_type text, result text NOT NULL DEFAULT 'verified'
+);
+CREATE INDEX IF NOT EXISTS asset_audit_scans_asset_date ON asset_audit_scans(asset_id,scanned_at DESC);
+CREATE INDEX IF NOT EXISTS asset_audit_scans_org_date ON asset_audit_scans(org_id,scanned_at DESC);
