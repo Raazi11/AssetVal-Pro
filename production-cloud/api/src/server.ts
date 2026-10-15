@@ -152,14 +152,14 @@ app.get('/v1/assets',async(req,res)=>{
       LEFT JOIN asset_categories c ON c.id=a.category_id
       LEFT JOIN locations l ON l.id=a.location_id
       LEFT JOIN loc_tree lt ON lt.id=a.location_id
-      LEFT JOIN locations dep ON dep.id=lt.department_id
+      LEFT JOIN locations dep ON dep.id=COALESCE(a.department_id,lt.department_id)
       LEFT JOIN custodians cu ON cu.id=a.custodian_id
       LEFT JOIN vendors v ON v.id=a.vendor_id
       WHERE a.org_id=$1
         AND ($2::text IS NULL OR a.tag ILIKE '%'||$2||'%' OR a.asset_name ILIKE '%'||$2||'%' OR COALESCE(a.serial,'') ILIKE '%'||$2||'%' OR COALESCE(a.brand,'') ILIKE '%'||$2||'%' OR COALESCE(a.model,'') ILIKE '%'||$2||'%')
         AND ($3::uuid IS NULL OR a.category_id=$3)
         AND ($4::uuid IS NULL OR a.location_id=$4)
-        AND ($5::uuid IS NULL OR lt.department_id=$5)
+        AND ($5::uuid IS NULL OR COALESCE(a.department_id,lt.department_id)=$5)
         AND ($6::uuid IS NULL OR a.custodian_id=$6)
         AND ($7::uuid IS NULL OR a.vendor_id=$7)
         AND ($8::text IS NULL OR a.status=$8)
