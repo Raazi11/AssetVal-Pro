@@ -26,6 +26,7 @@ async function audit(input:z.infer<typeof auditSchema>){
   }catch(e){await client.query('ROLLBACK');throw e}finally{client.release()}
 }
 app.get('/health',async()=>({ok:true,service:'assetval-pro-api'}));
+app.get('/v1/auth/me',async(req:any,res)=>{const auth=req.auth as AuthContext|undefined;if(!auth)return res.code(401).send({error:'authentication_required'});return auth;});
 const locationType=z.enum(['site','building','floor','area','room','department']);
 const locationCreate=z.object({orgId:z.string().uuid(),parentId:z.string().uuid().nullable().default(null),locationType,name:z.string().min(1).max(160),code:z.string().max(60).nullable().default(null),address:z.string().max(500).nullable().default(null),description:z.string().max(1000).nullable().default(null)});
 const locationUpdate=locationCreate.partial().omit({orgId:true});
@@ -349,19 +350,22 @@ app.post('/v1/import/smart/validate',async(req,res)=>{
 });
 app.post('/v1/import/smart/prepare',async(req,res)=>{
   const body=smartImport.safeParse(req.body);if(!body.success)return res.code(400).send({error:body.error.flatten()});
+  const auth=req.auth as AuthContext;if(!requireRole(auth,['owner','admin','asset_manager'],res))return;
   const mapped=mapSmartRows(body.data),v=await validateSmart(body.data.orgId,mapped);if(v.rows.some(x=>!x.valid))return res.code(422).send({error:'Fix validation errors before requesting approval',validation:v});
   const batchId='IMP-'+Date.now()+'-'+Math.random().toString(36).slice(2,8).toUpperCase(),client=await pool.connect();
   try{await client.query('BEGIN');await client.query(`INSERT INTO asset_import_batches(id,org_id,file_name,total_rows,imported_rows,error_rows,status,asset_ids,mapping,cleaning_summary,duplicate_summary) VALUES($1,$2,$3,$4,0,0,'pending_approval','[]'::jsonb,$5::jsonb,$6::jsonb,$7::jsonb)`,
     [batchId,body.data.orgId,body.data.fileName||null,v.rows.length,JSON.stringify(body.data.mapping),JSON.stringify(v.cleaning),JSON.stringify(v.duplicates)]);
     for(const row of v.rows)await client.query(`INSERT INTO asset_import_batch_items(batch_id,row_number,data,errors,action) VALUES($1,$2,$3::jsonb,'[]'::jsonb,'imported')`,[batchId,row.rowNumber,JSON.stringify(row)]);
-    const ap=await client.query(`INSERT INTO approvals(org_id,entity,entity_id,status,requested_by,comments) VALUES($1,'asset_import_batch',$2,'pending',NULL,$3) RETURNING id`,[body.data.orgId,batchId,'Bulk asset import approval request']);
+    const ap=await client.query(`INSERT INTO approvals(org_id,entity,entity_id,status,requested_by,comments) VALUES($1,'asset_import_batch',$2,'pending',$3,$4) RETURNING id`,[body.data.orgId,batchId,req.auth?.userId||null,'Bulk asset import approval request']);
     await client.query('UPDATE asset_import_batches SET approval_id=$1 WHERE id=$2',[ap.rows[0].id,batchId]);await client.query('COMMIT');
-    await audit({orgId:body.data.orgId,actorId:null,action:'asset.import_batch_submitted',entity:'asset_import_batch',entityId:batchId,metadata:{total:v.rows.length,cleaning:v.cleaning,duplicates:v.duplicates}});
+    await audit({orgId:body.data.orgId,actorId:(req.auth as AuthContext).userId,action:'asset.import_batch_submitted',entity:'asset_import_batch',entityId:batchId,metadata:{total:v.rows.length,cleaning:v.cleaning,duplicates:v.duplicates}});
     return {batchId,approvalId:ap.rows[0].id,status:'pending_approval',total:v.rows.length};
   }catch(e){await client.query('ROLLBACK');return res.code(409).send({error:e instanceof Error?e.message:'prepare failed'})}finally{client.release()}
 });
 app.post('/v1/import/smart/approve/:id',async(req,res)=>{
   const p=req.params as {id:string},body=importApprove.safeParse(req.body);if(!body.success)return res.code(400).send({error:body.error.flatten()});
+  const auth=req.auth as AuthContext;if(!requireRole(auth,['owner','admin','approver'],res))return;
+  body.data.actorId=auth.userId;
   const client=await pool.connect();try{await client.query('BEGIN');const b=await client.query(`SELECT approval_id,status FROM asset_import_batches WHERE id=$1 AND org_id=$2 FOR UPDATE`,[p.id,body.data.orgId]);if(!b.rowCount)return res.code(404).send({error:'batch not found'});if(b.rows[0].status!=='pending_approval')return res.code(409).send({error:'batch is not awaiting approval'});
     await client.query(`UPDATE approvals SET status='approved',reviewed_by=$1,reviewed_at=now() WHERE id=$2`,[body.data.actorId,b.rows[0].approval_id]);await client.query(`UPDATE asset_import_batches SET status='approved',approved_at=now(),approved_by=$1 WHERE id=$2`,[body.data.actorId,p.id]);await client.query('COMMIT');
     await audit({orgId:body.data.orgId,actorId:body.data.actorId,action:'asset.import_batch_approved',entity:'asset_import_batch',entityId:p.id,metadata:{}});return {batchId:p.id,status:'approved'};
@@ -369,6 +373,8 @@ app.post('/v1/import/smart/approve/:id',async(req,res)=>{
 });
 app.post('/v1/import/smart/import/:id',async(req,res)=>{
   const p=req.params as {id:string},body=importApprove.safeParse(req.body);if(!body.success)return res.code(400).send({error:body.error.flatten()});
+  const auth=req.auth as AuthContext;if(!requireRole(auth,['owner','admin','asset_manager'],res))return;
+  body.data.actorId=auth.userId;
   const client=await pool.connect();try{await client.query('BEGIN');const b=await client.query(`SELECT status FROM asset_import_batches WHERE id=$1 AND org_id=$2 FOR UPDATE`,[p.id,body.data.orgId]);if(!b.rowCount)return res.code(404).send({error:'batch not found'});if(b.rows[0].status!=='approved')return res.code(409).send({error:'batch must be approved before import'});
     const items=await client.query(`SELECT id,row_number,data FROM asset_import_batch_items WHERE batch_id=$1 ORDER BY row_number`,[p.id]);const assetIds:string[]=[];
     for(const item of items.rows){const row=item.data;let tag=row.assetId||'AST-'+String(Date.now()+assetIds.length).slice(-12);const dup=await client.query(`SELECT 1 FROM assets WHERE org_id=$1 AND (tag=$2 OR (serial IS NOT NULL AND serial=$3)) LIMIT 1`,[body.data.orgId,tag,row.serial||null]);if(dup.rowCount)throw new Error('Duplicate detected during approved import: '+tag);
@@ -380,12 +386,14 @@ app.post('/v1/import/smart/import/:id',async(req,res)=>{
     await audit({orgId:body.data.orgId,actorId:body.data.actorId,action:'asset.import_batch_completed',entity:'asset_import_batch',entityId:p.id,metadata:{imported:assetIds.length}});return {batchId:p.id,imported:assetIds.length,status:'completed'};
   }catch(e){await client.query('ROLLBACK');return res.code(409).send({error:e instanceof Error?e.message:'import failed'})}finally{client.release()}
 });
-app.get('/v1/import/history',async(req,res)=>{
+app.get('/v1/import/history',async(req:any,res)=>{
   const q=req.query as {orgId?:string};if(!q.orgId)return res.code(400).send({error:'orgId required'});
+  const auth=req.auth as AuthContext;if(!requireRole(auth,['owner','admin','asset_manager','approver','auditor','viewer'],res))return;
   const r=await pool.query(`SELECT id,file_name AS "fileName",total_rows AS "totalRows",imported_rows AS "importedRows",error_rows AS "errorRows",status,created_at AS "createdAt",rolled_back_at AS "rolledBackAt",cleaning_summary AS "cleaningSummary",duplicate_summary AS "duplicateSummary",approval_id AS "approvalId",approved_at AS "approvedAt" FROM asset_import_batches WHERE org_id=$1 ORDER BY created_at DESC`,[q.orgId]);return r.rows;
 });
 app.post('/v1/import/history/:id/rollback',async(req,res)=>{
   const p=req.params as {id:string};const q=req.query as {orgId?:string};if(!q.orgId)return res.code(400).send({error:'orgId required'});
+  const auth=req.auth as AuthContext;if(!requireRole(auth,['owner','admin'],res))return;
   const client=await pool.connect();try{await client.query('BEGIN');const b=await client.query(`SELECT id,asset_ids,status FROM asset_import_batches WHERE id=$1 AND org_id=$2 FOR UPDATE`,[p.id,q.orgId]);if(!b.rowCount)return res.code(404).send({error:'import batch not found'});if(b.rows[0].status!=='completed')return res.code(409).send({error:'only completed imports can be rolled back'});
     const ids=Array.isArray(b.rows[0].asset_ids)?b.rows[0].asset_ids:JSON.parse(b.rows[0].asset_ids||'[]');const deps=await client.query(`SELECT ((SELECT COUNT(*) FROM asset_transfers t WHERE t.org_id=$1 AND t.asset_id=ANY($2::uuid[])) + (SELECT COUNT(*) FROM service_records s WHERE s.org_id=$1 AND s.asset_id=ANY($2::uuid[])))::int AS n`,[q.orgId,ids]);if(Number(deps.rows[0].n)>0)throw new Error('Rollback blocked: imported assets have dependent service/transfer records');
     await client.query(`DELETE FROM assets WHERE org_id=$1 AND id=ANY($2::uuid[])`,[q.orgId,ids]);await client.query(`UPDATE asset_import_batches SET status='rolled_back',rolled_back_at=now() WHERE id=$1`,[p.id]);await client.query('COMMIT');
