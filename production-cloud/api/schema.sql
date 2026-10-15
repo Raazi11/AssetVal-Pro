@@ -222,6 +222,8 @@ CREATE TABLE IF NOT EXISTS asset_import_batches(
 );
 CREATE INDEX IF NOT EXISTS asset_import_batches_org_created ON asset_import_batches(org_id,created_at DESC);
 
+
+ALTER TABLE approvals ALTER COLUMN entity_id TYPE text USING entity_id::text;
 -- Import intelligence v1.4
 ALTER TABLE asset_import_batches DROP CONSTRAINT IF EXISTS asset_import_batches_status_check;
 ALTER TABLE asset_import_batches ADD CONSTRAINT asset_import_batches_status_check CHECK(status IN ('pending_approval','approved','completed','rolled_back','rejected'));
