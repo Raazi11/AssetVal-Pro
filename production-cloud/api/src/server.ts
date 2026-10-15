@@ -486,6 +486,30 @@ app.get('/v1/dashboard/valuation',async(req,res)=>{
     return {currency:'SAR',categories:rows.rows,total:total.rows[0],marketValueByCategory:categoryMarket.rows};
   }catch{return res.code(500).send({error:'valuation dashboard failed'})}
 });
+app.get('/v1/assets/lookup/:tag',async(req,res)=>{
+  const p=req.params as {tag:string};const q=req.query as {orgId?:string};
+  if(!q.orgId||!z.string().uuid().safeParse(q.orgId).success)return res.code(400).send({error:'valid orgId required'});
+  const r=await pool.query(`SELECT a.id,a.tag,a.asset_name AS "name",a.serial,a.condition,a.status,c.name AS category,l.name AS location FROM assets a LEFT JOIN asset_categories c ON c.id=a.category_id LEFT JOIN locations l ON l.id=a.location_id WHERE a.org_id=$1 AND a.tag=$2`,[q.orgId,p.tag]);
+  if(!r.rowCount)return res.code(404).send({error:'asset not found'});return r.rows[0];
+});
+app.get('/v1/assets/:id/audit-scans',async(req,res)=>{
+  const p=req.params as {id:string};const q=req.query as {orgId?:string};
+  if(!q.orgId||!z.string().uuid().safeParse(q.orgId).success||!z.string().uuid().safeParse(p.id).success)return res.code(400).send({error:'invalid asset or orgId'});
+  const r=await pool.query(`SELECT id,asset_id AS "assetId",technician_id AS "technicianId",scanned_at AS "scannedAt",serial_verified AS "serialVerified",location_verified AS "locationVerified",condition,comments,result FROM asset_audit_scans WHERE asset_id=$1 AND org_id=$2 ORDER BY scanned_at DESC`,[p.id,q.orgId]);return r.rows;
+});
+app.post('/v1/assets/:id/audit-scan',async(req,res)=>{
+  const p=req.params as {id:string};
+  const body=z.object({orgId:z.string().uuid(),serialVerified:z.boolean(),locationVerified:z.boolean(),condition:z.enum(['Excellent','Good','Fair','Poor','Damaged','Scrap']),comments:z.string().max(4000).optional(),photoObjectKey:z.string().max(1000).optional(),photoContentType:z.string().max(200).optional()}).safeParse(req.body);
+  if(!body.success)return res.code(400).send({error:body.error.flatten()});
+  const auth=req.auth as AuthContext;if(!requireRole(auth,['owner','admin','asset_manager','auditor','approver'],res))return;
+  const a=await pool.query('SELECT id,tag,serial,location_id FROM assets WHERE id=$1 AND org_id=$2',[p.id,body.data.orgId]);
+  if(!a.rowCount)return res.code(404).send({error:'asset not found'});
+  const r=await pool.query(`INSERT INTO asset_audit_scans(org_id,asset_id,technician_id,serial_verified,location_verified,condition,comments,photo_object_key,photo_content_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+    [body.data.orgId,p.id,auth.userId,body.data.serialVerified,body.data.locationVerified,body.data.condition,body.data.comments||null,body.data.photoObjectKey||null,body.data.photoContentType||null]);
+  await audit({orgId:body.data.orgId,actorId:auth.userId,action:'asset.physical_audit_completed',entity:'asset',entityId:p.id,metadata:{tag:a.rows[0].tag,condition:body.data.condition,serialVerified:body.data.serialVerified,locationVerified:body.data.locationVerified}});
+  await pool.query('UPDATE assets SET condition=$1 WHERE id=$2 AND org_id=$3',[body.data.condition,p.id,body.data.orgId]);
+  return r.rows[0];
+});
 app.get('/v1/assets/:id/valuation-history',async(req,res)=>{
   const p=req.params as {id:string};const q=req.query as {orgId?:string};
   if(!q.orgId||!z.string().uuid().safeParse(q.orgId).success||!z.string().uuid().safeParse(p.id).success)return res.code(400).send({error:'invalid asset or orgId'});
