@@ -485,6 +485,27 @@ app.get('/v1/dashboard/valuation',async(req,res)=>{
     return {currency:'SAR',categories:rows.rows,total:total.rows[0]};
   }catch{return res.code(500).send({error:'valuation dashboard failed'})}
 });
+app.get('/v1/assets/:id/valuation',async(req,res)=>{
+  const p=req.params as {id:string};const q=req.query as {orgId?:string};
+  if(!q.orgId||!z.string().uuid().safeParse(q.orgId).success||!z.string().uuid().safeParse(p.id).success)return res.code(400).send({error:'invalid asset or orgId'});
+  const r=await pool.query(`SELECT id,tag,asset_name AS "name",cost AS "originalCost",
+    GREATEST(cost-CASE WHEN depreciation_method='straight_line' THEN GREATEST(cost-salvage_value,0)*LEAST(GREATEST(EXTRACT(YEAR FROM age(current_date,purchase_date)),0)/NULLIF(useful_life_years,0),1) ELSE 0 END,0) AS "bookValue",
+    market_value AS "marketValue",market_value_source AS "marketValueSource",market_value_method AS "marketValueMethod",market_value_notes AS "marketValueNotes",market_value_updated_at AS "marketValueUpdatedAt"
+    FROM assets WHERE id=$1 AND org_id=$2`,[p.id,q.orgId]);
+  if(!r.rowCount)return res.code(404).send({error:'asset not found'});
+  return r.rows[0];
+});
+app.patch('/v1/assets/:id/market-value',async(req,res)=>{
+  const p=req.params as {id:string};const body=z.object({orgId:z.string().uuid(),marketValue:z.number().nonnegative().nullable(),source:z.enum(['manual','rule','external_valuation']),method:z.string().max(100).optional(),notes:z.string().max(2000).optional()}).safeParse(req.body);
+  if(!body.success)return res.code(400).send({error:body.error.flatten()});
+  const auth=req.auth as AuthContext;if(!requireRole(auth,['owner','admin','asset_manager','approver'],res))return;
+  if(body.data.source==='manual'&&!['owner','admin','approver'].includes(auth.role))return res.code(403).send({error:'market_value_manual_entry_requires_authorized_valuer'});
+  const r=await pool.query(`UPDATE assets SET market_value=$1,market_value_source=$2,market_value_method=$3,market_value_notes=$4,market_value_updated_at=now(),market_value_updated_by=$5 WHERE id=$6 AND org_id=$7 RETURNING id,market_value,market_value_source,market_value_method,market_value_notes,market_value_updated_at`,
+    [body.data.marketValue,body.data.source,body.data.method||null,body.data.notes||null,auth.userId,p.id,body.data.orgId]);
+  if(!r.rowCount)return res.code(404).send({error:'asset not found'});
+  await audit({orgId:body.data.orgId,actorId:auth.userId,action:'asset.market_value_updated',entity:'asset',entityId:p.id,metadata:{source:body.data.source,marketValue:body.data.marketValue,method:body.data.method||null}});
+  return r.rows[0];
+});
 app.get('/v1/assets/:id/attachments',async(req,res)=>{
   const p=req.params as {id:string}; const q=req.query as {orgId?:string};
   if(!q.orgId || !z.string().uuid().safeParse(q.orgId).success || !z.string().uuid().safeParse(p.id).success)return res.code(400).send({error:'invalid asset or orgId'});
