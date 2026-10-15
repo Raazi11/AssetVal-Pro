@@ -290,74 +290,106 @@ async function validateBulk(orgId:string,rawRows:any[]){
   return results;
 }
 
-// Smart import history, preview, error export and rollback
+// Smart Excel Import Intelligence v1.4: clean -> match -> validate -> approve -> import -> history -> rollback
 const smartImport=z.object({orgId:z.string().uuid(),mapping:z.record(z.string()),rows:z.array(z.record(z.any())).max(10000),fileName:z.string().max(255).optional()});
+const importApprove=z.object({orgId:z.string().uuid(),actorId:z.string().uuid().nullable().default(null)});
+function cleanText(v:any){return String(v??'').replace(/[\\u0000-\\u001F]/g,' ').replace(/\\s+/g,' ').trim()}
+function cleanSerial(v:any){return cleanText(v).toUpperCase().replace(/\\s+/g,'')}
+function parseImportDate(v:any){
+  if(v===null||v===undefined||cleanText(v)==='') return null;
+  if(typeof v==='number' && Number.isFinite(v)){const d=new Date(Date.UTC(1899,11,30)+v*86400000);return d.toISOString().slice(0,10)}
+  const x=cleanText(v),iso=x.match(/^(\\d{4})[-/.](\\d{1,2})[-/.](\\d{1,2})$/),dmy=x.match(/^(\\d{1,2})[\\/\\-.](\\d{1,2})[\\/\\-.](\\d{4})$/);
+  const d=iso?new Date(Date.UTC(+iso[1],+iso[2]-1,+iso[3])):dmy?new Date(Date.UTC(+dmy[3],+dmy[2]-1,+dmy[1])):new Date(x);
+  return Number.isNaN(d.getTime())?null:d.toISOString().slice(0,10);
+}
+function cleanCost(v:any){if(typeof v==='number')return Number.isFinite(v)?Math.round(v*100)/100:null;const x=cleanText(v).replace(/[,₹$€£]|SAR|AED|INR|USD/gi,'').replace(/[^0-9.-]/g,'');if(!x)return null;const n=Number(x);return Number.isFinite(n)?Math.round(n*100)/100:null}
+function similarity(a:string,b:string){a=normalizeName(a);b=normalizeName(b);if(!a||!b)return 0;if(a===b)return 1;const m=a.length,n=b.length,dp=Array.from({length:m+1},()=>Array(n+1).fill(0));for(let i=0;i<=m;i++)dp[i][0]=i;for(let j=0;j<=n;j++)dp[0][j]=j;for(let i=1;i<=m;i++)for(let j=1;j<=n;j++)dp[i][j]=Math.min(dp[i-1][j]+1,dp[i][j-1]+1,dp[i-1][j-1]+(a[i-1]===b[j-1]?0:1));return 1-dp[m][n]/Math.max(m,n)}
+function bestMatch(value:string,items:any[],codeOk=true){const n=normalizeName(value);if(!n)return null;const exact=items.find(x=>normalizeName(x.name)===n||(codeOk&&normalizeName(x.code||'')===n));if(exact)return {...exact,matchType:'exact',matchScore:1};const scored=items.map(x=>({...x,matchScore:Math.max(similarity(n,x.name),codeOk?similarity(n,x.code||''):0)})).sort((a,b)=>b.matchScore-a.matchScore);return scored[0]&&scored[0].matchScore>=0.82?{...scored[0],matchType:'fuzzy'}:null}
 function mapSmartRows(body:any){
   return body.rows.map((r:any,i:number)=>({
-    rowNumber:i+2,
-    assetId:String(r[body.mapping.assetId]??'').trim(),
-    name:String(r[body.mapping.name]??'').trim(),
-    category:String(r[body.mapping.category]??'').trim(),
-    brand:String(r[body.mapping.brand]??'').trim(),
-    model:String(r[body.mapping.model]??'').trim(),
-    serial:String(r[body.mapping.serial]??'').trim(),
-    location:String(r[body.mapping.location]??'').trim(),
-    department:String(r[body.mapping.department]??'').trim(),
-    purchaseDate:String(r[body.mapping.purchaseDate]??'').trim(),
-    cost:r[body.mapping.cost]??'',
-    condition:String(r[body.mapping.condition]??'Good').trim()
-  }));
+    rowNumber:i+2,assetId:cleanText(r[body.mapping.assetId]),name:cleanText(r[body.mapping.name]),category:cleanText(r[body.mapping.category]),
+    brand:cleanText(r[body.mapping.brand]),model:cleanText(r[body.mapping.model]),serial:cleanSerial(r[body.mapping.serial]),
+    location:cleanText(r[body.mapping.location]),department:cleanText(r[body.mapping.department]),purchaseDate:r[body.mapping.purchaseDate]??'',
+    cost:r[body.mapping.cost]??'',condition:cleanText(r[body.mapping.condition])||'Good'
+  }))
+}
+async function validateSmart(orgId:string,rawRows:any[]){
+  const [cats,locs,existing]=await Promise.all([
+    pool.query(`SELECT id,name,code,parent_id FROM asset_categories WHERE active=true AND (org_id IS NULL OR org_id=$1)`,[orgId]),
+    pool.query(`SELECT id,name,code,location_type,parent_id FROM locations WHERE active=true AND org_id=$1`,[orgId]),
+    pool.query(`SELECT tag,serial FROM assets WHERE org_id=$1`,[orgId])
+  ]);
+  const catItems=cats.rows,locItems=locs.rows,existingTags=new Set(existing.rows.map(x=>normalizeName(x.tag))),existingSerials=new Set(existing.rows.filter(x=>x.serial).map(x=>normalizeName(x.serial)));
+  const seenTags=new Set<string>(),seenSerials=new Set<string>(),results:any[]=[],cleaning={trimmed:0,normalizedSerials:0,normalizedCosts:0,normalizedDates:0},duplicates={existing:0,inFile:0};
+  for(const raw of rawRows){
+    const errors:string[]=[],warnings:string[]=[];
+    const name=cleanText(raw.name),category=bestMatch(raw.category,catItems),location=bestMatch(raw.location,locItems),department=raw.department?bestMatch(raw.department,locItems):null;
+    const purchaseDate=parseImportDate(raw.purchaseDate),cost=cleanCost(raw.cost),serial=cleanSerial(raw.serial),tag=cleanText(raw.assetId);
+    if(name!==raw.name)cleaning.trimmed++;if(serial!==raw.serial&&serial)cleaning.normalizedSerials++;if(String(cost??'')!==cleanText(raw.cost)&&cost!==null)cleaning.normalizedCosts++;if(purchaseDate&&purchaseDate!==cleanText(raw.purchaseDate))cleaning.normalizedDates++;
+    if(!name)errors.push('Missing asset name');
+    if(!category)errors.push('Category not matched'); else if(category.matchType==='fuzzy')warnings.push('Category fuzzy-matched to '+category.name);
+    if(!location)errors.push('Location not matched'); else if(location.matchType==='fuzzy')warnings.push('Location fuzzy-matched to '+location.name);
+    if(raw.department){if(!department||department.location_type!=='department')errors.push('Department not matched');else if(location&&department.parent_id!==location.id)errors.push('Department is not under the selected location');}
+    if(!purchaseDate)errors.push('Missing or invalid purchase date');
+    if(cost===null||cost<0)errors.push('Invalid price');
+    const condition=['Excellent','Good','Fair','Poor','Damaged'].includes(raw.condition)?raw.condition:'Good';
+    if(raw.condition&&!['Excellent','Good','Fair','Poor','Damaged'].includes(raw.condition))warnings.push('Condition normalized to Good');
+    if(tag){const k=normalizeName(tag);if(existingTags.has(k)){errors.push('Duplicate Asset ID already exists');duplicates.existing++}if(seenTags.has(k)){errors.push('Duplicate Asset ID in import');duplicates.inFile++}seenTags.add(k)}
+    if(serial){const k=normalizeName(serial);if(existingSerials.has(k)){errors.push('Duplicate serial number already exists');duplicates.existing++}if(seenSerials.has(k)){errors.push('Duplicate serial number in import');duplicates.inFile++}seenSerials.add(k)}
+    results.push({...raw,assetId:tag,name,category:category?.name||raw.category,categoryId:category?.id||null,categoryMatch:category?{type:category.matchType,score:category.matchScore}:null,
+      location:location?.name||raw.location,locationId:location?.id||null,locationMatch:location?{type:location.matchType,score:location.matchScore}:null,
+      department:department?.name||raw.department,departmentId:department?.id||null,purchaseDate,cost,serial,condition,warnings,errors,valid:errors.length===0});
+  }
+  return {rows:results,cleaning,duplicates};
 }
 app.post('/v1/import/smart/validate',async(req,res)=>{
   const body=smartImport.safeParse(req.body);if(!body.success)return res.code(400).send({error:body.error.flatten()});
-  try{
-    const rows=await validateBulk(body.data.orgId,mapSmartRows(body.data));
-    return {fileName:body.data.fileName||null,total:rows.length,valid:rows.filter(x=>x.valid).length,invalid:rows.filter(x=>!x.valid).length,rows};
-  }catch{return res.code(500).send({error:'smart import validation failed'})}
+  try{const mapped=mapSmartRows(body.data),v=await validateSmart(body.data.orgId,mapped);return {fileName:body.data.fileName||null,total:v.rows.length,valid:v.rows.filter(x=>x.valid).length,invalid:v.rows.filter(x=>!x.valid).length,cleaning:v.cleaning,duplicates:v.duplicates,rows:v.rows};}
+  catch{return res.code(500).send({error:'smart import validation failed'})}
 });
-app.post('/v1/import/smart/commit',async(req,res)=>{
+app.post('/v1/import/smart/prepare',async(req,res)=>{
   const body=smartImport.safeParse(req.body);if(!body.success)return res.code(400).send({error:body.error.flatten()});
-  const mapped=mapSmartRows(body.data),rows=await validateBulk(body.data.orgId,mapped);
-  if(rows.some(x=>!x.valid))return res.code(422).send({error:'Fix validation errors before importing',rows});
-  const batchId='IMP-'+Date.now()+'-'+Math.random().toString(36).slice(2,8).toUpperCase();
-  const client=await pool.connect();let imported=0;const assetIds:string[]=[];
-  try{
-    await client.query('BEGIN');
-    for(const row of rows){
-      let tag=row.assetId;
-      if(!tag)tag='AST-GEN-'+String(Date.now()+imported).slice(-9);
-      const r=await client.query(\`INSERT INTO assets(org_id,tag,asset_name,serial,category_id,location_id,department_id,model,brand,cost,purchase_date,condition,status)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'Active') RETURNING id\`,
-        [body.data.orgId,tag,row.name,row.serial||null,row.categoryId,row.locationId,row.departmentId,row.model||null,row.brand||null,row.cost,row.purchaseDate,row.condition]);
-      assetIds.push(r.rows[0].id);imported++;
+  const mapped=mapSmartRows(body.data),v=await validateSmart(body.data.orgId,mapped);if(v.rows.some(x=>!x.valid))return res.code(422).send({error:'Fix validation errors before requesting approval',validation:v});
+  const batchId='IMP-'+Date.now()+'-'+Math.random().toString(36).slice(2,8).toUpperCase(),client=await pool.connect();
+  try{await client.query('BEGIN');await client.query(`INSERT INTO asset_import_batches(id,org_id,file_name,total_rows,imported_rows,error_rows,status,asset_ids,mapping,cleaning_summary,duplicate_summary) VALUES($1,$2,$3,$4,0,0,'pending_approval','[]'::jsonb,$5::jsonb,$6::jsonb,$7::jsonb)`,
+    [batchId,body.data.orgId,body.data.fileName||null,v.rows.length,JSON.stringify(body.data.mapping),JSON.stringify(v.cleaning),JSON.stringify(v.duplicates)]);
+    for(const row of v.rows)await client.query(`INSERT INTO asset_import_batch_items(batch_id,row_number,data,errors,action) VALUES($1,$2,$3::jsonb,'[]'::jsonb,'imported')`,[batchId,row.rowNumber,JSON.stringify(row)]);
+    const ap=await client.query(`INSERT INTO approvals(org_id,entity,entity_id,status,requested_by,comments) VALUES($1,'asset_import_batch',$2,'pending',NULL,$3) RETURNING id`,[body.data.orgId,batchId,'Bulk asset import approval request']);
+    await client.query('UPDATE asset_import_batches SET approval_id=$1 WHERE id=$2',[ap.rows[0].id,batchId]);await client.query('COMMIT');
+    await audit({orgId:body.data.orgId,actorId:null,action:'asset.import_batch_submitted',entity:'asset_import_batch',entityId:batchId,metadata:{total:v.rows.length,cleaning:v.cleaning,duplicates:v.duplicates}});
+    return {batchId,approvalId:ap.rows[0].id,status:'pending_approval',total:v.rows.length};
+  }catch(e){await client.query('ROLLBACK');return res.code(409).send({error:e instanceof Error?e.message:'prepare failed'})}finally{client.release()}
+});
+app.post('/v1/import/smart/approve/:id',async(req,res)=>{
+  const p=req.params as {id:string},body=importApprove.safeParse(req.body);if(!body.success)return res.code(400).send({error:body.error.flatten()});
+  const client=await pool.connect();try{await client.query('BEGIN');const b=await client.query(`SELECT approval_id,status FROM asset_import_batches WHERE id=$1 AND org_id=$2 FOR UPDATE`,[p.id,body.data.orgId]);if(!b.rowCount)return res.code(404).send({error:'batch not found'});if(b.rows[0].status!=='pending_approval')return res.code(409).send({error:'batch is not awaiting approval'});
+    await client.query(`UPDATE approvals SET status='approved',reviewed_by=$1,reviewed_at=now() WHERE id=$2`,[body.data.actorId,b.rows[0].approval_id]);await client.query(`UPDATE asset_import_batches SET status='approved',approved_at=now(),approved_by=$1 WHERE id=$2`,[body.data.actorId,p.id]);await client.query('COMMIT');
+    await audit({orgId:body.data.orgId,actorId:body.data.actorId,action:'asset.import_batch_approved',entity:'asset_import_batch',entityId:p.id,metadata:{}});return {batchId:p.id,status:'approved'};
+  }catch(e){await client.query('ROLLBACK');return res.code(409).send({error:e instanceof Error?e.message:'approval failed'})}finally{client.release()}
+});
+app.post('/v1/import/smart/import/:id',async(req,res)=>{
+  const p=req.params as {id:string},body=importApprove.safeParse(req.body);if(!body.success)return res.code(400).send({error:body.error.flatten()});
+  const client=await pool.connect();try{await client.query('BEGIN');const b=await client.query(`SELECT status FROM asset_import_batches WHERE id=$1 AND org_id=$2 FOR UPDATE`,[p.id,body.data.orgId]);if(!b.rowCount)return res.code(404).send({error:'batch not found'});if(b.rows[0].status!=='approved')return res.code(409).send({error:'batch must be approved before import'});
+    const items=await client.query(`SELECT id,row_number,data FROM asset_import_batch_items WHERE batch_id=$1 ORDER BY row_number`,[p.id]);const assetIds:string[]=[];
+    for(const item of items.rows){const row=item.data;let tag=row.assetId||'AST-'+String(Date.now()+assetIds.length).slice(-12);const dup=await client.query(`SELECT 1 FROM assets WHERE org_id=$1 AND (tag=$2 OR (serial IS NOT NULL AND serial=$3)) LIMIT 1`,[body.data.orgId,tag,row.serial||null]);if(dup.rowCount)throw new Error('Duplicate detected during approved import: '+tag);
+      const ins=await client.query(`INSERT INTO assets(org_id,tag,asset_name,serial,category_id,location_id,department_id,model,brand,cost,purchase_date,condition,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'Active') RETURNING id`,[body.data.orgId,tag,row.name,row.serial||null,row.categoryId,row.locationId,row.departmentId,row.model||null,row.brand||null,row.cost,row.purchaseDate,row.condition]);
+      assetIds.push(ins.rows[0].id);await client.query(`UPDATE asset_import_batch_items SET asset_id=$1,action='imported' WHERE id=$2`,[ins.rows[0].id,item.id]);
+      await audit({orgId:body.data.orgId,actorId:body.data.actorId,action:'asset.imported',entity:'asset',entityId:ins.rows[0].id,metadata:{batchId:p.id,rowNumber:item.row_number}});
     }
-    await client.query(\`INSERT INTO asset_import_batches(id,org_id,file_name,total_rows,imported_rows,error_rows,status,asset_ids)
-      VALUES($1,$2,$3,$4,$5,0,'completed',$6::jsonb)\`,
-      [batchId,body.data.orgId,body.data.fileName||null,rows.length,imported,JSON.stringify(assetIds)]);
-    await client.query('COMMIT');
-    await audit({orgId:body.data.orgId,actorId:null,action:'asset.import_batch_completed',entity:'asset_import_batch',entityId:batchId,metadata:{fileName:body.data.fileName||null,imported,total:rows.length}});
-    return {batchId,imported,total:rows.length};
-  }catch(e){await client.query('ROLLBACK');return res.code(409).send({error:e instanceof Error?e.message:'smart import failed'})}finally{client.release()}
+    await client.query(`UPDATE asset_import_batches SET status='completed',imported_rows=$1,asset_ids=$2::jsonb WHERE id=$3`,[assetIds.length,JSON.stringify(assetIds),p.id]);await client.query('COMMIT');
+    await audit({orgId:body.data.orgId,actorId:body.data.actorId,action:'asset.import_batch_completed',entity:'asset_import_batch',entityId:p.id,metadata:{imported:assetIds.length}});return {batchId:p.id,imported:assetIds.length,status:'completed'};
+  }catch(e){await client.query('ROLLBACK');return res.code(409).send({error:e instanceof Error?e.message:'import failed'})}finally{client.release()}
 });
 app.get('/v1/import/history',async(req,res)=>{
   const q=req.query as {orgId?:string};if(!q.orgId)return res.code(400).send({error:'orgId required'});
-  const r=await pool.query(\`SELECT id,file_name AS "fileName",total_rows AS "totalRows",imported_rows AS "importedRows",error_rows AS "errorRows",status,created_at AS "createdAt",rolled_back_at AS "rolledBackAt" FROM asset_import_batches WHERE org_id=$1 ORDER BY created_at DESC\`,[q.orgId]);
-  return r.rows;
+  const r=await pool.query(`SELECT id,file_name AS "fileName",total_rows AS "totalRows",imported_rows AS "importedRows",error_rows AS "errorRows",status,created_at AS "createdAt",rolled_back_at AS "rolledBackAt",cleaning_summary AS "cleaningSummary",duplicate_summary AS "duplicateSummary",approval_id AS "approvalId",approved_at AS "approvedAt" FROM asset_import_batches WHERE org_id=$1 ORDER BY created_at DESC`,[q.orgId]);return r.rows;
 });
 app.post('/v1/import/history/:id/rollback',async(req,res)=>{
   const p=req.params as {id:string};const q=req.query as {orgId?:string};if(!q.orgId)return res.code(400).send({error:'orgId required'});
-  const client=await pool.connect();
-  try{
-    await client.query('BEGIN');
-    const b=await client.query(\`SELECT id,asset_ids,status FROM asset_import_batches WHERE id=$1 AND org_id=$2 FOR UPDATE\`,[p.id,q.orgId]);
-    if(!b.rowCount)return res.code(404).send({error:'import batch not found'});
-    if(b.rows[0].status==='rolled_back')return res.code(409).send({error:'batch already rolled back'});
-    const ids=Array.isArray(b.rows[0].asset_ids)?b.rows[0].asset_ids:JSON.parse(b.rows[0].asset_ids||'[]');
-    await client.query(\`DELETE FROM assets WHERE org_id=$1 AND id = ANY($2::uuid[])\`,[q.orgId,ids]);
-    await client.query(\`UPDATE asset_import_batches SET status='rolled_back',rolled_back_at=now() WHERE id=$1\`,[p.id]);
-    await client.query('COMMIT');
-    await audit({orgId:q.orgId,actorId:null,action:'asset.import_batch_rolled_back',entity:'asset_import_batch',entityId:p.id,metadata:{deleted:ids.length}});
-    return {rolledBack:true,deleted:ids.length};
+  const client=await pool.connect();try{await client.query('BEGIN');const b=await client.query(`SELECT id,asset_ids,status FROM asset_import_batches WHERE id=$1 AND org_id=$2 FOR UPDATE`,[p.id,q.orgId]);if(!b.rowCount)return res.code(404).send({error:'import batch not found'});if(b.rows[0].status!=='completed')return res.code(409).send({error:'only completed imports can be rolled back'});
+    const ids=Array.isArray(b.rows[0].asset_ids)?b.rows[0].asset_ids:JSON.parse(b.rows[0].asset_ids||'[]');const deps=await client.query(`SELECT COUNT(*)::int AS n FROM asset_transfers t WHERE t.org_id=$1 AND t.asset_id=ANY($2::uuid[]) OR EXISTS(SELECT 1 FROM service_records s WHERE s.org_id=$1 AND s.asset_id=ANY($2::uuid[]))`,[q.orgId,ids]);if(Number(deps.rows[0].n)>0)throw new Error('Rollback blocked: imported assets have dependent service/transfer records');
+    await client.query(`DELETE FROM assets WHERE org_id=$1 AND id=ANY($2::uuid[])`,[q.orgId,ids]);await client.query(`UPDATE asset_import_batches SET status='rolled_back',rolled_back_at=now() WHERE id=$1`,[p.id]);await client.query('COMMIT');
+    await audit({orgId:q.orgId,actorId:null,action:'asset.import_batch_rolled_back',entity:'asset_import_batch',entityId:p.id,metadata:{deleted:ids.length}});return {rolledBack:true,deleted:ids.length};
   }catch(e){await client.query('ROLLBACK');return res.code(409).send({error:e instanceof Error?e.message:'rollback failed'})}finally{client.release()}
 });
 app.post('/v1/import/assets/validate',async(req,res)=>{
