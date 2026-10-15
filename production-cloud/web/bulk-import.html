@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AssetVal Pro — Bulk Excel Import</title>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<style>
+:root{--bg:#f5f7fb;--card:#fff;--line:#e3e8f1;--text:#182236;--muted:#6c7688;--blue:#2457d6;--good:#168653;--bad:#c63d45;--warn:#a76700;--shadow:0 8px 28px rgba(20,35,70,.07)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px Inter,Segoe UI,Arial,sans-serif}.wrap{max-width:1500px;margin:auto;padding:24px}.head{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:18px}.head h1{margin:0 0 5px;font-size:26px}.muted{color:var(--muted)}button{border:0;border-radius:9px;padding:10px 14px;font:inherit;cursor:pointer}.primary{background:var(--blue);color:#fff}.ghost{background:#edf1f7;color:var(--text)}.success{background:#e9f8f0;color:var(--good)}.danger{background:#fff0f1;color:var(--bad)}.actions{display:flex;gap:8px;flex-wrap:wrap}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);padding:18px;margin-bottom:16px}.steps{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.step{padding:13px;border:1px solid var(--line);border-radius:10px;background:#fafbfe}.step b{display:block;margin-bottom:4px}.drop{border:2px dashed #b9c4d8;border-radius:12px;padding:34px;text-align:center;background:#fbfcff}.drop input{display:none}.drop label{display:inline-block;background:var(--blue);color:#fff;padding:11px 16px;border-radius:9px;cursor:pointer}.summary{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.stat{border:1px solid var(--line);border-radius:11px;padding:14px;background:#fafbfe}.stat b{font-size:22px;display:block;margin-top:3px}.good{color:var(--good)}.bad{color:var(--bad)}.warn{color:var(--warn)}.tablewrap{overflow:auto}.table{width:100%;border-collapse:collapse;min-width:1300px}.table th,.table td{border-bottom:1px solid var(--line);padding:8px;text-align:left;vertical-align:top}.table th{background:#f8f9fc;color:var(--muted);font-size:12px;text-transform:uppercase;position:sticky;top:0}.table input{width:100%;min-width:100px;border:1px solid var(--line);border-radius:6px;padding:7px;background:#fff}.table tr.invalid{background:#fff8f8}.error{display:block;color:var(--bad);font-size:11px;margin-top:4px;white-space:normal;min-width:180px}.ok{color:var(--good);font-size:12px}.toolbar{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:12px}.notice{padding:11px;border-radius:9px;background:#fff7e7;color:#805300;margin-top:10px}.hidden{display:none!important}@media(max-width:800px){.wrap{padding:12px}.head{flex-direction:column;align-items:flex-start}.steps,.summary{grid-template-columns:1fr 1fr}}@media(max-width:500px){.steps,.summary{grid-template-columns:1fr}}
+</style></head>
+<body><div class="wrap">
+<div class="head"><div><h1>Bulk Excel Import</h1><div class="muted">Import an existing company asset register with validation before anything is written to the database.</div></div><div class="actions"><button class="ghost" onclick="location.href='assets.html'">← Asset Register</button><button class="primary" onclick="downloadTemplate()">Download Excel Template</button></div></div>
+
+<div class="card"><div class="steps">
+<div class="step"><b>1. Download</b><span class="muted">Use the official AssetVal Pro template.</span></div>
+<div class="step"><b>2. Upload</b><span class="muted">Select your .xlsx or .xls register.</span></div>
+<div class="step"><b>3. Correct</b><span class="muted">Fix highlighted validation errors.</span></div>
+<div class="step"><b>4. Import</b><span class="muted">Only fully valid rows are imported.</span></div>
+</div></div>
+
+<div class="card">
+<div class="drop"><p><b>Upload your asset register</b></p><p class="muted">Required columns: Asset ID, Name, Category, Brand, Model, Serial, Location, Department, Purchase Date, Cost, Condition</p><label for="file">Choose Excel File</label><input id="file" type="file" accept=".xlsx,.xls,.csv"></div>
+<div id="fileName" class="muted" style="margin-top:10px"></div>
+</div>
+
+<div id="work" class="hidden">
+<div class="card"><div class="summary">
+<div class="stat">Total Rows<b id="total">0</b></div>
+<div class="stat good">Valid Assets<b id="valid">0</b></div>
+<div class="stat bad">Rows With Errors<b id="invalid">0</b></div>
+<div class="stat warn">Errors<b id="errors">0</b></div>
+</div><div id="message"></div></div>
+
+<div class="card">
+<div class="toolbar"><div><b>Validation & Correction</b><div class="muted">Edit any cell directly, then click Validate Again.</div></div><div class="actions"><button class="ghost" onclick="validateRows()">Validate Again</button><button id="importBtn" class="success" onclick="commitImport()" disabled>Import Valid Assets</button></div></div>
+<div class="tablewrap"><table class="table"><thead><tr><th>#</th><th>Asset ID</th><th>Name</th><th>Category</th><th>Brand</th><th>Model</th><th>Serial</th><th>Location</th><th>Department</th><th>Purchase Date</th><th>Cost</th><th>Condition</th><th>Validation</th></tr></thead><tbody id="rows"></tbody></table></div>
+</div>
+</div>
+</div>
+<script>
+const API=localStorage.getItem('assetvalApi')||'http://localhost:8080';
+const ORG=localStorage.getItem('assetvalOrgId')||'00000000-0000-0000-0000-000000000000';
+const headers=['Asset ID','Name','Category','Brand','Model','Serial','Location','Department','Purchase Date','Cost','Condition'];
+let rows=[];
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+async function api(path,opts){const r=await fetch(API+path,opts);const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||r.statusText);return d}
+function downloadTemplate(){
+ const ws=XLSX.utils.aoa_to_sheet([headers,
+ ['AST-TV-00025','Samsung 65 Smart TV','TV','Samsung','QA65','123456789','Riyadh Head Office','Meeting Room','2024-05-15',4500,'Good']]);
+ const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Assets');
+ ws['!cols']=headers.map((h,i)=>({wch:[18,28,20,16,18,20,24,22,18,14,14][i]}));
+ XLSX.writeFile(wb,'AssetVal-Pro-Asset-Import-Template.xlsx');
+}
+function excelDate(v){
+ if(v instanceof Date && !isNaN(v))return v.toISOString().slice(0,10);
+ if(typeof v==='number'){const d=XLSX.SSF.parse_date_code(v);if(d)return String(d.y).padStart(4,'0')+'-'+String(d.m).padStart(2,'0')+'-'+String(d.d).padStart(2,'0')}
+ return String(v??'').trim();
+}
+function normalizeRow(r,i){
+ const pick=(...names)=>{for(const n of names){if(r[n]!==undefined)return r[n]}return ''};
+ return {rowNumber:i+2,assetId:String(pick('Asset ID')).trim(),name:String(pick('Name')).trim(),category:String(pick('Category')).trim(),brand:String(pick('Brand')).trim(),model:String(pick('Model')).trim(),serial:String(pick('Serial')).trim(),location:String(pick('Location')).trim(),department:String(pick('Department')).trim(),purchaseDate:excelDate(pick('Purchase Date')),cost:pick('Cost'),condition:String(pick('Condition')||'Good').trim()};
+}
+$('file').onchange=async e=>{
+ const file=e.target.files[0];if(!file)return;
+ $('fileName').textContent='Selected: '+file.name;
+ try{
+  const data=await file.arrayBuffer(),wb=XLSX.read(data,{type:'array',cellDates:true});
+  const sheet=wb.Sheets[wb.SheetNames[0]],raw=XLSX.utils.sheet_to_json(sheet,{defval:'',raw:true});
+  if(!raw.length)throw new Error('The Excel sheet is empty.');
+  rows=raw.map((r,i)=>normalizeRow(r,i));$('work').classList.remove('hidden');render();await validateRows();
+ }catch(err){alert(err.message)}
+};
+function render(){
+ $('rows').innerHTML=rows.map((r,i)=>'<tr id="r'+i+'"><td>'+r.rowNumber+'</td>'+['assetId','name','category','brand','model','serial','location','department','purchaseDate','cost','condition'].map(k=>'<td><input data-i="'+i+'" data-k="'+k+'" value="'+esc(r[k])+'" oninput="cell(this)"></td>').join('')+'<td id="e'+i+'"><span class="muted">Not validated</span></td></tr>').join('');
+}
+function cell(el){rows[Number(el.dataset.i)][el.dataset.k]=el.value;document.getElementById('importBtn').disabled=true}
+async function validateRows(){
+ try{
+  const d=await api('/v1/import/assets/validate',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({orgId:ORG,rows})});
+  rows=d.rows;renderValidation(d);$('message').innerHTML='<div class="notice">Validation is complete. Correct every highlighted row before importing.</div>';
+ }catch(e){$('message').innerHTML='<div class="notice">'+esc(e.message)+'</div>'}
+}
+function renderValidation(d){
+ $('total').textContent=d.total;$('valid').textContent=d.valid;$('invalid').textContent=d.invalid;$('errors').textContent=d.rows.reduce((n,r)=>n+(r.errors?.length||0),0);
+ d.rows.forEach((r,i)=>{const tr=document.getElementById('r'+i),cell=document.getElementById('e'+i);tr.classList.toggle('invalid',!r.valid);cell.innerHTML=r.valid?'<span class="ok">✓ Valid</span>':'<span class="error">'+r.errors.map(esc).join('<br>')+'</span>';});
+ $('importBtn').disabled=d.invalid>0||d.valid===0;
+}
+async function commitImport(){
+ if(!confirm('Import all validated assets into AssetVal Pro?'))return;
+ try{
+  const d=await api('/v1/import/assets/commit',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({orgId:ORG,rows})});
+  alert('Import complete: '+d.imported+' assets imported.');
+  location.href='assets.html';
+ }catch(e){alert(e.message)}
+}
+</script></body></html>
