@@ -1,0 +1,1 @@
+{"name":"assetval-pro-api","private":true,"type":"module","scripts":{"dev":"tsx src/server.ts","start":"node dist/server.js"},"dependencies":{"@fastify/cors":"latest","@fastify/helmet":"latest","fastify":"latest","pg":"latest","zod":"latest"},"devDependencies":{"tsx":"latest","typescript":"latest"}}
