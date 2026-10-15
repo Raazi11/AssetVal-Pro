@@ -61,6 +61,29 @@ CREATE TABLE IF NOT EXISTS vendors(
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS asset_categories(
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id uuid REFERENCES organizations(id) ON DELETE CASCADE,
+  parent_id uuid,
+  code text NOT NULL,
+  name text NOT NULL,
+  description text,
+  is_system boolean NOT NULL DEFAULT false,
+  active boolean NOT NULL DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT asset_categories_parent_fk FOREIGN KEY(parent_id) REFERENCES asset_categories(id) ON DELETE RESTRICT,
+  CONSTRAINT asset_categories_no_self_parent CHECK(parent_id IS NULL OR parent_id <> id),
+  UNIQUE(org_id,code)
+);
+CREATE INDEX IF NOT EXISTS asset_categories_org_parent ON asset_categories(org_id,parent_id);
+CREATE UNIQUE INDEX IF NOT EXISTS asset_categories_system_code ON asset_categories(code) WHERE org_id IS NULL;
+
+INSERT INTO asset_categories(org_id,code,name,is_system) VALUES
+(NULL,'IT','IT Equipment',true),(NULL,'CCTV-ELV','CCTV / ELV',true),(NULL,'ELEC','Electronics',true),
+(NULL,'APP','Appliances',true),(NULL,'FURN','Furniture',true),(NULL,'MACH','Machinery',true),
+(NULL,'TOOLS','Tools',true),(NULL,'VEH','Vehicles',true),(NULL,'OTHER','Other',true)
+ON CONFLICT DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS assets(
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
@@ -71,11 +94,17 @@ CREATE TABLE IF NOT EXISTS assets(
   serial text,
   asset_name text NOT NULL,
   category text,
+  category_id uuid,
   model text,
   cost numeric(18,2) NOT NULL DEFAULT 0,
+  useful_life_years numeric(8,2) NOT NULL DEFAULT 5,
+  salvage_value numeric(18,2) NOT NULL DEFAULT 0,
+  depreciation_method text NOT NULL DEFAULT 'straight_line',
+  purchase_date date,
   status text NOT NULL DEFAULT 'Active',
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(org_id,tag),
+  CONSTRAINT assets_category_fk FOREIGN KEY(category_id) REFERENCES asset_categories(id) ON DELETE SET NULL,
   CONSTRAINT assets_location_fk FOREIGN KEY(location_id) REFERENCES locations(id) ON DELETE RESTRICT,
   CONSTRAINT assets_custodian_fk FOREIGN KEY(custodian_id) REFERENCES custodians(id) ON DELETE SET NULL,
   CONSTRAINT assets_vendor_fk FOREIGN KEY(vendor_id) REFERENCES vendors(id) ON DELETE SET NULL
