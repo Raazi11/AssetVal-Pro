@@ -481,8 +481,9 @@ app.get('/v1/dashboard/valuation',async(req,res)=>{
       LEFT JOIN assets a ON a.category_id=c2.id AND a.org_id=$1
       GROUP BY top.id,top.name,top.code
     ) SELECT * FROM vals ORDER BY acquisition_value DESC`,[q.orgId]);
-    const total=await pool.query(`SELECT COUNT(*)::int AS assets,COALESCE(SUM(cost),0)::numeric AS "acquisitionValue" FROM assets WHERE org_id=$1`,[q.orgId]);
-    return {currency:'SAR',categories:rows.rows,total:total.rows[0]};
+    const total=await pool.query(`SELECT COUNT(*)::int AS assets,COALESCE(SUM(cost),0)::numeric AS "acquisitionValue",COALESCE(SUM(GREATEST(cost-CASE WHEN depreciation_method='straight_line' THEN GREATEST(cost-salvage_value,0)*LEAST(GREATEST(EXTRACT(YEAR FROM age(current_date,purchase_date)),0)/NULLIF(useful_life_years,0),1) ELSE 0 END,0)),0)::numeric AS "bookValue",COALESCE(SUM(market_value),0)::numeric AS "marketValue" FROM assets WHERE org_id=$1`,[q.orgId]);
+    const categoryMarket=await pool.query(`SELECT c.id,c.name,COALESCE(SUM(a.market_value),0)::numeric AS market_value FROM asset_categories c LEFT JOIN assets a ON a.category_id=c.id AND a.org_id=$1 WHERE c.org_id IS NULL AND c.parent_id IS NULL GROUP BY c.id,c.name`,[q.orgId]);
+    return {currency:'SAR',categories:rows.rows,total:total.rows[0],marketValueByCategory:categoryMarket.rows};
   }catch{return res.code(500).send({error:'valuation dashboard failed'})}
 });
 app.get('/v1/assets/:id/valuation',async(req,res)=>{
