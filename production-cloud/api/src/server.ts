@@ -228,6 +228,104 @@ app.post('/v1/assets',async(req,res)=>{
     return res.code(201).send(r.rows[0]);
   }catch{return res.code(409).send({error:'asset could not be created; check references and unique tag'})}
 });
+
+// Bulk Excel import validation and commit
+const bulkRow=z.object({
+  rowNumber:z.coerce.number().int().positive(),
+  assetId:z.string().trim().max(80).nullable().default(null),
+  name:z.string().trim().max(200).nullable().default(null),
+  category:z.string().trim().max(160).nullable().default(null),
+  brand:z.string().trim().max(120).nullable().default(null),
+  model:z.string().trim().max(160).nullable().default(null),
+  serial:z.string().trim().max(160).nullable().default(null),
+  location:z.string().trim().max(160).nullable().default(null),
+  department:z.string().trim().max(160).nullable().default(null),
+  purchaseDate:z.string().trim().nullable().default(null),
+  cost:z.any().nullable().default(null),
+  condition:z.string().trim().nullable().default(null)
+});
+const bulkRequest=z.object({orgId:z.string().uuid(),rows:z.array(bulkRow).max(10000)});
+function parseImportDate(v:any){
+  if(v===null||v===undefined||String(v).trim()==='') return null;
+  const x=String(v).trim(),m=x.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/),iso=x.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  const d=iso?new Date(Date.UTC(+iso[1],+iso[2]-1,+iso[3])):m?new Date(Date.UTC(+m[3],+m[2]-1,+m[1])):new Date(x);
+  return Number.isNaN(d.getTime())?null:d.toISOString().slice(0,10);
+}
+function normalizeName(v:any){return String(v??'').trim().toLowerCase().replace(/\s+/g,' ')}
+async function validateBulk(orgId:string,rawRows:any[]){
+  const parsed=rawRows.map((r,i)=>bulkRow.safeParse({...r,rowNumber:r?.rowNumber??i+2})).map((x,i)=>x.success?x.data:{rowNumber:i+2,assetId:null,name:null,category:null,brand:null,model:null,serial:null,location:null,department:null,purchaseDate:null,cost:null,condition:null,_schemaError:true});
+  const [cats,locs]=await Promise.all([
+    pool.query(\`SELECT id,name,code,parent_id FROM asset_categories WHERE active=true AND (org_id IS NULL OR org_id=$1)\`,[orgId]),
+    pool.query(\`SELECT id,name,location_type,parent_id FROM locations WHERE active=true AND org_id=$1\`,[orgId])
+  ]);
+  const catMap=new Map(cats.rows.map(x=>[normalizeName(x.name),x]));
+  const locMap=new Map(locs.rows.map(x=>[normalizeName(x.name),x]));
+  const existingSerials=(await pool.query(\`SELECT serial FROM assets WHERE org_id=$1 AND serial IS NOT NULL AND trim(serial)<>''\`,[orgId])).rows.map(x=>normalizeName(x.serial));
+  const seenSerial=new Set<string>(),seenTag=new Set<string>(),results:any[]=[];
+  for(const row of parsed){
+    const errors:string[]=[];
+    if((row as any)._schemaError){errors.push('Invalid row format');results.push({...row,errors,valid:false});continue}
+    if(!row.name)errors.push('Missing asset name');
+    const cat=catMap.get(normalizeName(row.category)); if(!cat)errors.push('Invalid or missing category');
+    const loc=locMap.get(normalizeName(row.location)); if(!loc)errors.push('Invalid or missing location');
+    let dep:any=null;
+    if(row.department){
+      dep=locMap.get(normalizeName(row.department));
+      if(!dep || dep.location_type!=='department')errors.push('Invalid department');
+      else if(loc && dep.parent_id!==loc.id)errors.push('Department is not under the selected location');
+    }
+    const date=parseImportDate(row.purchaseDate); if(!date)errors.push('Missing or invalid purchase date');
+    const cost=Number(row.cost); if(row.cost===null||row.cost===''||!Number.isFinite(cost)||cost<0)errors.push('Invalid price');
+    const condition=['Excellent','Good','Fair','Poor','Damaged'].includes(String(row.condition||'Good'))?String(row.condition||'Good'):'Good';
+    const serial=normalizeName(row.serial);
+    if(serial){
+      if(existingSerials.includes(serial))errors.push('Duplicate serial number already exists');
+      if(seenSerial.has(serial))errors.push('Duplicate serial number in import');
+      seenSerial.add(serial);
+    }
+    const tag=String(row.assetId||'').trim();
+    if(tag){if(seenTag.has(normalizeName(tag)))errors.push('Duplicate Asset ID in import');seenTag.add(normalizeName(tag));}
+    results.push({...row,categoryId:cat?.id??null,locationId:loc?.id??null,departmentId:dep?.id??null,purchaseDate:date,cost:Number.isFinite(cost)?cost:null,condition,errors,valid:errors.length===0});
+  }
+  return results;
+}
+app.post('/v1/import/assets/validate',async(req,res)=>{
+  const body=bulkRequest.safeParse(req.body); if(!body.success)return res.code(400).send({error:body.error.flatten()});
+  try{
+    const rows=await validateBulk(body.data.orgId,body.data.rows),valid=rows.filter(x=>x.valid).length;
+    return {total:rows.length,valid,invalid:rows.length-valid,summary:{
+      purchaseDates:rows.filter(x=>x.errors?.some((e:string)=>e.toLowerCase().includes('purchase date'))).length,
+      duplicates:rows.filter(x=>x.errors?.some((e:string)=>e.toLowerCase().includes('duplicate serial'))).length,
+      prices:rows.filter(x=>x.errors?.includes('Invalid price')).length
+    },rows};
+  }catch{return res.code(500).send({error:'bulk import validation failed'})}
+});
+app.post('/v1/import/assets/commit',async(req,res)=>{
+  const body=bulkRequest.safeParse(req.body); if(!body.success)return res.code(400).send({error:body.error.flatten()});
+  const rows=await validateBulk(body.data.orgId,body.data.rows);
+  if(rows.some(x=>!x.valid))return res.code(422).send({error:'Import contains invalid rows',validation:{total:rows.length,valid:rows.filter(x=>x.valid).length,invalid:rows.filter(x=>!x.valid).length,rows}});
+  const client=await pool.connect(); let imported=0;
+  try{
+    await client.query('BEGIN');
+    for(const row of rows){
+      let tag=String(row.assetId||'').trim();
+      if(!tag){
+        const cat=await client.query(\`SELECT 'AST-'||upper(substr(code,1,8))||'-'||lpad((COUNT(*)+1)::text,5,'0') AS tag FROM assets a JOIN asset_categories c ON c.id=a.category_id WHERE a.org_id=$1 AND a.category_id=$2 GROUP BY c.code\`,[body.data.orgId,row.categoryId]);
+        tag=cat.rows[0]?.tag||'AST-GEN-'+String(imported+1).padStart(5,'0');
+      }
+      const exists=await client.query(\`SELECT 1 FROM assets WHERE org_id=$1 AND (tag=$2 OR (serial IS NOT NULL AND serial=$3)) LIMIT 1\`,[body.data.orgId,tag,row.serial||null]);
+      if(exists.rowCount)throw new Error('Duplicate Asset ID or serial detected during import: '+tag);
+      await client.query(\`INSERT INTO assets(org_id,tag,asset_name,serial,category_id,location_id,model,brand,cost,purchase_date,condition,status)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'Active')\`,
+        [body.data.orgId,tag,row.name,row.serial||null,row.categoryId,row.locationId,row.model||null,row.brand||null,row.cost,row.purchaseDate,row.condition]);
+      imported++;
+    }
+    await client.query('COMMIT');
+    await audit({orgId:body.data.orgId,actorId:null,action:'asset.bulk_imported',entity:'asset_import',entityId:'bulk-'+Date.now(),metadata:{imported}});
+    return {imported,skipped:0};
+  }catch(e){await client.query('ROLLBACK');return res.code(409).send({error:e instanceof Error?e.message:'bulk import failed'})}finally{client.release()}
+});
+
 app.get('/v1/dashboard/valuation',async(req,res)=>{
   const q=req.query as {orgId?:string};
   if(!q.orgId || !z.string().uuid().safeParse(q.orgId).success)return res.code(400).send({error:'orgId must be a UUID'});
