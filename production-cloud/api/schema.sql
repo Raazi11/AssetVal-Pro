@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS assets(
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   location_id uuid,
+  department_id uuid,
   custodian_id uuid,
   vendor_id uuid,
   tag text NOT NULL,
@@ -108,6 +109,7 @@ CREATE TABLE IF NOT EXISTS assets(
   UNIQUE(org_id,tag),
   CONSTRAINT assets_category_fk FOREIGN KEY(category_id) REFERENCES asset_categories(id) ON DELETE SET NULL,
   CONSTRAINT assets_location_fk FOREIGN KEY(location_id) REFERENCES locations(id) ON DELETE RESTRICT,
+  CONSTRAINT assets_department_fk FOREIGN KEY(department_id) REFERENCES locations(id) ON DELETE SET NULL,
   CONSTRAINT assets_custodian_fk FOREIGN KEY(custodian_id) REFERENCES custodians(id) ON DELETE SET NULL,
   CONSTRAINT assets_vendor_fk FOREIGN KEY(vendor_id) REFERENCES vendors(id) ON DELETE SET NULL
 );
@@ -202,3 +204,6 @@ JOIN (VALUES
 ('APP','APP-FRIDGE','Refrigerator'),('APP','APP-AC','Air conditioner'),('APP','APP-MICRO','Microwave'),('APP','APP-WASH','Washing machine')
 ) AS v(parent_code,code,name) ON p.code=v.parent_code AND p.org_id IS NULL
 ON CONFLICT DO NOTHING;
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS department_id uuid;
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='assets_department_fk') THEN ALTER TABLE assets ADD CONSTRAINT assets_department_fk FOREIGN KEY(department_id) REFERENCES locations(id) ON DELETE SET NULL; END IF; END $$;
+CREATE INDEX IF NOT EXISTS assets_org_department ON assets(org_id,department_id);
