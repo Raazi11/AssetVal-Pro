@@ -221,3 +221,24 @@ CREATE TABLE IF NOT EXISTS asset_import_batches(
   rolled_back_at timestamptz
 );
 CREATE INDEX IF NOT EXISTS asset_import_batches_org_created ON asset_import_batches(org_id,created_at DESC);
+
+-- Import intelligence v1.4
+ALTER TABLE asset_import_batches DROP CONSTRAINT IF EXISTS asset_import_batches_status_check;
+ALTER TABLE asset_import_batches ADD CONSTRAINT asset_import_batches_status_check CHECK(status IN ('pending_approval','approved','completed','rolled_back','rejected'));
+ALTER TABLE asset_import_batches ADD COLUMN IF NOT EXISTS mapping jsonb NOT NULL DEFAULT '{}';
+ALTER TABLE asset_import_batches ADD COLUMN IF NOT EXISTS cleaning_summary jsonb NOT NULL DEFAULT '{}';
+ALTER TABLE asset_import_batches ADD COLUMN IF NOT EXISTS duplicate_summary jsonb NOT NULL DEFAULT '{}';
+ALTER TABLE asset_import_batches ADD COLUMN IF NOT EXISTS approval_id uuid;
+ALTER TABLE asset_import_batches ADD COLUMN IF NOT EXISTS approved_at timestamptz;
+ALTER TABLE asset_import_batches ADD COLUMN IF NOT EXISTS approved_by uuid;
+CREATE TABLE IF NOT EXISTS asset_import_batch_items(
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  batch_id text NOT NULL REFERENCES asset_import_batches(id) ON DELETE CASCADE,
+  row_number integer NOT NULL,
+  asset_id uuid REFERENCES assets(id) ON DELETE SET NULL,
+  action text NOT NULL CHECK(action IN ('imported','skipped','error')),
+  data jsonb NOT NULL DEFAULT '{}',
+  errors jsonb NOT NULL DEFAULT '[]',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS asset_import_batch_items_batch ON asset_import_batch_items(batch_id,row_number);
