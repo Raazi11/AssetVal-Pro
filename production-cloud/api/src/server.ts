@@ -4,11 +4,40 @@ import cors from '@fastify/cors';
 import { Pool } from 'pg';
 import { z } from 'zod';
 import crypto from 'node:crypto';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
 
 const app=Fastify({logger:true});
 await app.register(helmet);
 await app.register(cors,{origin:false});
 const pool=new Pool({connectionString:process.env.DATABASE_URL});
+const OIDC_ISSUER=process.env.OIDC_ISSUER?.replace(/\/$/,'');
+const OIDC_AUDIENCE=process.env.OIDC_AUDIENCE;
+const OIDC_JWKS_URL=process.env.OIDC_JWKS_URL;
+const OIDC_REQUIRED=process.env.OIDC_REQUIRED!=='false';
+const jwks=OIDC_JWKS_URL?createRemoteJWKSet(new URL(OIDC_JWKS_URL)):null;
+type AuthContext={userId:string;orgId:string;role:string;email:string;subject:string};
+async function authenticate(req:any,res:any):Promise<AuthContext|null>{
+  if(!OIDC_REQUIRED)return null;
+  const header=String(req.headers.authorization||'');
+  if(!header.startsWith('Bearer ')){res.code(401).send({error:'authentication_required'});return null}
+  if(!jwks||!OIDC_ISSUER||!OIDC_AUDIENCE){res.code(500).send({error:'oidc_not_configured'});return null}
+  try{
+    const {payload}=await jwtVerify(header.slice(7),jwks,{issuer:OIDC_ISSUER,audience:OIDC_AUDIENCE});
+    const subject=String(payload.sub||''),email=String(payload.email||payload.preferred_username||'').toLowerCase();
+    const orgId=String(req.body?.orgId||req.query?.orgId||'');
+    if(!subject||!z.string().uuid().safeParse(orgId).success){res.code(400).send({error:'valid orgId is required'});return null}
+    const q=await pool.query(`SELECT u.id AS "userId",u.email,m.org_id AS "orgId",m.role,u.oidc_subject AS "oidcSubject" FROM users u JOIN memberships m ON m.user_id=u.id WHERE m.org_id=$1 AND (u.oidc_subject=$2 OR lower(u.email)=lower($3)) LIMIT 1`,[orgId,subject,email]);
+    if(!q.rowCount){res.code(403).send({error:'organization_access_denied'});return null}
+    const row=q.rows[0];if(!row.oidcSubject)await pool.query('UPDATE users SET oidc_subject=$1 WHERE id=$2',[subject,row.userId]);
+    return {userId:row.userId,orgId:row.orgId,role:row.role,email:row.email,subject};
+  }catch(e){req.log.warn({err:e},'OIDC verification failed');res.code(401).send({error:'invalid_access_token'});return null}
+}
+function requireRole(auth:AuthContext|null,roles:string[],res:any){if(!auth){if(!res.sent)res.code(401).send({error:'authentication_required'});return false}if(!roles.includes(auth.role)){res.code(403).send({error:'insufficient_role',requiredRoles:roles});return false}return true}
+app.addHook('preHandler',async(req:any,res:any)=>{
+  if(req.url.split('?')[0]==='/health')return;
+  const auth=await authenticate(req,res);if(res.sent)return;if(auth)req.auth=auth;
+});
+
 const auditSchema=z.object({orgId:z.string().uuid(),actorId:z.string().uuid().nullable(),action:z.string().min(1),entity:z.string().min(1),entityId:z.string().min(1),metadata:z.record(z.any()).default({})});
 
 async function audit(input:z.infer<typeof auditSchema>){
