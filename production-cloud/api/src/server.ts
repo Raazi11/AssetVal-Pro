@@ -247,4 +247,12 @@ app.get('/v1/dashboard/valuation',async(req,res)=>{
     return {currency:'SAR',categories:rows.rows,total:total.rows[0]};
   }catch{return res.code(500).send({error:'valuation dashboard failed'})}
 });
+app.get('/v1/assets/:id/attachments',async(req,res)=>{
+  const p=req.params as {id:string}; const q=req.query as {orgId?:string};
+  if(!q.orgId || !z.string().uuid().safeParse(q.orgId).success || !z.string().uuid().safeParse(p.id).success)return res.code(400).send({error:'invalid asset or orgId'});
+  try{
+    const r=await pool.query(`SELECT id,object_key AS "objectKey",content_type AS "contentType",created_at AS "createdAt" FROM attachments WHERE asset_id=$1 AND org_id=$2 ORDER BY created_at DESC`,[p.id,q.orgId]);
+    return r.rows;
+  }catch{return res.code(500).send({error:'attachment query failed'})}
+});
 app.listen({host:'0.0.0.0',port:Number(process.env.PORT||8080)});
