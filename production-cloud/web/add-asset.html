@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AssetVal Pro — Add Asset</title>
+<style>
+body{font-family:Inter,system-ui,sans-serif;margin:0;background:#f5f7fb;color:#172033}header{padding:22px 28px;background:#111827;color:#fff}main{max-width:1200px;margin:auto;padding:24px}.card{background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:24px;box-shadow:0 5px 20px #0000000a}h1{margin-top:0}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}.full{grid-column:1/-1}label{display:block;font-weight:650;margin-bottom:6px}input,select,button{width:100%;box-sizing:border-box;padding:11px 12px;border:1px solid #d1d5db;border-radius:9px;font:inherit}button{background:#111827;color:#fff;cursor:pointer;font-weight:650}.id{padding:14px;background:#f8fafc;border-radius:10px;font-size:20px;font-weight:700;margin-bottom:20px}.muted{font-size:12px;color:#6b7280;font-weight:400}.actions{display:flex;gap:10px;margin-top:22px}.actions button{flex:1}.success{display:none;padding:15px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:10px;margin-top:15px}.preview{display:grid;grid-template-columns:1fr 1fr;gap:10px}.preview div{background:#f8fafc;padding:12px;border-radius:9px}@media(max-width:750px){.grid,.preview{grid-template-columns:1fr}.full{grid-column:auto}}
+</style></head>
+<body><header><strong>AssetVal Pro</strong><div style="opacity:.75">/ Add Asset</div></header>
+<main><section class="card"><h1>Add Asset</h1><div class="id">Asset ID: <span id="assetId">AST-GEN-00001</span><div class="muted">Generated automatically when the asset is saved.</div></div>
+<div class="grid">
+<div><label>Asset Name *</label><input id="assetName" placeholder='Samsung 65" Smart TV'></div>
+<div><label>Category *</label><select id="category" onchange="updateId()"><option value="">Loading categories…</option></select></div>
+<div><label>Brand</label><input id="brand" placeholder="Samsung"></div>
+<div><label>Model</label><input id="model" placeholder="QA65"></div>
+<div><label>Serial Number</label><input id="serial" placeholder="123456789"></div>
+<div><label>Location</label><select id="location"><option value="">Loading locations…</option></select></div>
+<div><label>Department / Room</label><select id="department"><option value="">Select department / room</option></select></div>
+<div><label>Custodian</label><select id="custodian"><option value="">Select custodian</option></select></div>
+<div><label>Vendor / Supplier</label><select id="vendor"><option value="">Select vendor</option></select></div>
+<div><label>Purchase Date</label><input id="purchaseDate" type="date"></div>
+<div><label>Purchase Cost (SAR)</label><input id="cost" type="number" min="0" step="0.01" placeholder="4500"></div>
+<div><label>Condition</label><select id="condition"><option>Excellent</option><option selected>Good</option><option>Fair</option><option>Poor</option><option>Damaged</option></select></div>
+<div><label>Useful Life (years)</label><input id="life" type="number" min="1" step=".5" value="5"></div>
+<div><label>Salvage Value (SAR)</label><input id="salvage" type="number" min="0" step=".01" value="0"></div>
+<div><label>Depreciation Method</label><select id="method"><option value="straight_line">Straight Line</option><option value="declining_balance">Declining Balance</option><option value="sum_of_years_digits">Sum of Years Digits</option></select></div>
+<div><label>Asset Photograph</label><input id="photo" type="file" accept="image/*"></div>
+<div><label>Invoice / Warranty Documents</label><input id="docs" type="file" multiple accept=".pdf,.jpg,.jpeg,.png"></div>
+<div class="full"><label>Notes</label><input id="notes" placeholder="Warranty, installation details, remarks…"></div>
+</div>
+<div class="actions"><button onclick="save()">Save Asset</button><button type="button" onclick="resetForm()">Clear</button></div><div id="success" class="success"></div>
+</section></main>
+<script>
+const API=localStorage.getItem('assetvalApi')||'http://localhost:8080';const ORG=localStorage.getItem('assetvalOrgId')||'';let cats=[],locs=[];
+async function init(){if(!ORG){alert('Set assetvalOrgId in local storage first.');return}try{cats=await (await fetch(API+'/v1/categories?orgId='+ORG)).json();const r=await fetch(API+'/v1/locations?orgId='+ORG);locs=await r.json();fill()}catch(e){alert('API connection failed.')}}
+function fill(){const c=document.getElementById('category');c.innerHTML='<option value="">Select category / subcategory</option>'+cats.map(x=>'<option value="'+x.id+'">'+(x.parentId?'↳ ':'')+esc(x.name)+'</option>').join('');const l=document.getElementById('location');l.innerHTML='<option value="">Select location</option>'+locs.map(x=>'<option value="'+x.id+'">'+esc(x.name)+'</option>').join('');document.getElementById('department').innerHTML='<option value="">Select department / room</option>'+locs.filter(x=>['department','room','area'].includes(x.locationType)).map(x=>'<option value="'+x.id+'">'+esc(x.name)+'</option>').join('');updateId()}
+function updateId(){const x=cats.find(c=>c.id===document.getElementById('category').value);document.getElementById('assetId').textContent='AST-'+(x?.code||'GEN')+'-00001'}
+async function save(){const name=document.getElementById('assetName').value.trim(),cat=document.getElementById('category').value;if(!name||!cat)return alert('Asset name and category are required.');const body={orgId:ORG,assetName:name,categoryId:cat,brand:val('brand')||null,model:val('model')||null,serial:val('serial')||null,locationId:val('location')||null,custodianId:val('custodian')||null,vendorId:val('vendor')||null,purchaseDate:val('purchaseDate')||null,cost:Number(val('cost')||0),condition:val('condition'),usefulLifeYears:Number(val('life')||5),salvageValue:Number(val('salvage')||0),depreciationMethod:val('method'),status:'Active'};const r=await fetch(API+'/v1/assets',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)return alert(d.error||'Could not save asset.');document.getElementById('assetId').textContent=d.tag;document.getElementById('success').style.display='block';document.getElementById('success').textContent='Asset '+d.tag+' created successfully. Invoice, warranty and photo upload storage will be attached to this asset in the document service.'}
+function val(id){return document.getElementById(id).value}function resetForm(){document.querySelectorAll('input').forEach(x=>{if(x.type!=='file')x.value=''});document.getElementById('life').value=5;document.getElementById('salvage').value=0;document.getElementById('condition').value='Good';updateId()}function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}init()
+</script></body></html>
