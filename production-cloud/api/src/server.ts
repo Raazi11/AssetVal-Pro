@@ -127,7 +127,7 @@ app.post('/v1/categories',async(req,res)=>{
 });
 const assetInput=z.object({
   orgId:z.string().uuid(),tag:z.string().min(1).max(80).optional(),assetName:z.string().min(1).max(200),serial:z.string().max(160).nullable().default(null),
-  categoryId:z.string().uuid().nullable().default(null),brand:z.string().max(120).nullable().default(null),locationId:z.string().uuid().nullable().default(null),custodianId:z.string().uuid().nullable().default(null),
+  categoryId:z.string().uuid().nullable().default(null),brand:z.string().max(120).nullable().default(null),locationId:z.string().uuid().nullable().default(null),departmentId:z.string().uuid().nullable().default(null),custodianId:z.string().uuid().nullable().default(null),
   vendorId:z.string().uuid().nullable().default(null),model:z.string().max(160).nullable().default(null),condition:z.enum(['Excellent','Good','Fair','Poor','Damaged']).default('Good'),cost:z.coerce.number().nonnegative().default(0),
   usefulLifeYears:z.coerce.number().positive().default(5),salvageValue:z.coerce.number().nonnegative().default(0),
   depreciationMethod:z.enum(['straight_line','declining_balance','sum_of_years_digits']).default('straight_line'),purchaseDate:z.string().nullable().default(null),status:z.string().default('Active')
@@ -174,11 +174,11 @@ app.patch('/v1/assets/:id',async(req,res)=>{
   if(!z.string().uuid().safeParse(p.id).success || !body?.orgId || !z.string().uuid().safeParse(body.orgId).success)return res.code(400).send({error:'invalid asset or orgId'});
   const parsed=assetUpdate.safeParse(body); if(!parsed.success)return res.code(400).send({error:parsed.error.flatten()});
   const v=parsed.data; const fields:string[]=[]; const values:any[]=[p.id,body.orgId]; let n=3;
-  const map:any={tag:'tag',assetName:'asset_name',serial:'serial',categoryId:'category_id',brand:'brand',locationId:'location_id',custodianId:'custodian_id',vendorId:'vendor_id',model:'model',condition:'condition',cost:'cost',usefulLifeYears:'useful_life_years',salvageValue:'salvage_value',depreciationMethod:'depreciation_method',purchaseDate:'purchase_date',status:'status'};
+  const map:any={tag:'tag',assetName:'asset_name',serial:'serial',categoryId:'category_id',brand:'brand',locationId:'location_id',custodianId:'custodian_id',vendorId:'vendor_id',departmentId:'department_id',model:'model',condition:'condition',cost:'cost',usefulLifeYears:'useful_life_years',salvageValue:'salvage_value',depreciationMethod:'depreciation_method',purchaseDate:'purchase_date',status:'status'};
   for(const [k,val] of Object.entries(v)){if(map[k]){fields.push(`${map[k]}=${n++}`);values.push(val)}}
   if(!fields.length)return res.code(400).send({error:'no changes'});
   try{
-    const r=await pool.query(`UPDATE assets SET ${fields.join(',')} WHERE id=$1 AND org_id=$2 RETURNING id,tag,asset_name AS "assetName",serial,category_id AS "categoryId",location_id AS "locationId",custodian_id AS "custodianId",vendor_id AS "vendorId",brand,model,cost,condition,useful_life_years AS "usefulLifeYears",salvage_value AS "salvageValue",depreciation_method AS "depreciationMethod",purchase_date AS "purchaseDate",status`,values);
+    const r=await pool.query(`UPDATE assets SET ${fields.join(',')} WHERE id=$1 AND org_id=$2 RETURNING id,tag,asset_name AS "assetName",serial,category_id AS "categoryId",location_id AS "locationId",department_id AS "departmentId",custodian_id AS "custodianId",vendor_id AS "vendorId",brand,model,cost,condition,useful_life_years AS "usefulLifeYears",salvage_value AS "salvageValue",depreciation_method AS "depreciationMethod",purchase_date AS "purchaseDate",status`,values);
     if(!r.rowCount)return res.code(404).send({error:'asset not found'});
     await audit({orgId:body.orgId,actorId:null,action:'asset.updated',entity:'asset',entityId:p.id,metadata:{changes:v}});
     return r.rows[0];
@@ -220,10 +220,10 @@ app.post('/v1/assets',async(req,res)=>{
   const v=x.data;
   try{
     const tag=v.tag || (await pool.query(`SELECT 'AST-' || upper(substr(coalesce(c.code,'GEN'),1,8)) || '-' || lpad((COUNT(a.id)+1)::text,5,'0') AS tag FROM asset_categories c LEFT JOIN assets a ON a.category_id=c.id WHERE c.id=$1 GROUP BY c.code`,[v.categoryId])).rows[0]?.tag || 'AST-GEN-00001';
-    const r=await pool.query(`INSERT INTO assets(org_id,tag,asset_name,serial,category_id,location_id,custodian_id,vendor_id,model,cost,useful_life_years,salvage_value,depreciation_method,purchase_date,status)
+    const r=await pool.query(`INSERT INTO assets(org_id,tag,asset_name,serial,category_id,location_id,department_id,custodian_id,vendor_id,model,cost,useful_life_years,salvage_value,depreciation_method,purchase_date,status)
       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
       RETURNING id,tag,asset_name AS "assetName",category_id AS "categoryId",location_id AS "locationId",custodian_id AS "custodianId",vendor_id AS "vendorId",cost,useful_life_years AS "usefulLifeYears",salvage_value AS "salvageValue",depreciation_method AS "depreciationMethod",purchase_date AS "purchaseDate",status`,
-      [v.orgId,tag,v.assetName,v.serial,v.categoryId,v.locationId,v.custodianId,v.vendorId,v.model,v.cost,v.usefulLifeYears,v.salvageValue,v.depreciationMethod,v.purchaseDate,v.status]);
+      [v.orgId,tag,v.assetName,v.serial,v.categoryId,v.locationId,v.departmentId,v.custodianId,v.vendorId,v.model,v.cost,v.usefulLifeYears,v.salvageValue,v.depreciationMethod,v.purchaseDate,v.status]);
     await audit({orgId:v.orgId,actorId:null,action:'asset.created',entity:'asset',entityId:r.rows[0].id,metadata:{tag,categoryId:v.categoryId,cost:v.cost}});
     return res.code(201).send(r.rows[0]);
   }catch{return res.code(409).send({error:'asset could not be created; check references and unique tag'})}
@@ -315,9 +315,9 @@ app.post('/v1/import/assets/commit',async(req,res)=>{
       }
       const exists=await client.query(\`SELECT 1 FROM assets WHERE org_id=$1 AND (tag=$2 OR (serial IS NOT NULL AND serial=$3)) LIMIT 1\`,[body.data.orgId,tag,row.serial||null]);
       if(exists.rowCount)throw new Error('Duplicate Asset ID or serial detected during import: '+tag);
-      await client.query(\`INSERT INTO assets(org_id,tag,asset_name,serial,category_id,location_id,model,brand,cost,purchase_date,condition,status)
+      await client.query(\`INSERT INTO assets(org_id,tag,asset_name,serial,category_id,location_id,department_id,model,brand,cost,purchase_date,condition,status)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'Active')\`,
-        [body.data.orgId,tag,row.name,row.serial||null,row.categoryId,row.locationId,row.model||null,row.brand||null,row.cost,row.purchaseDate,row.condition]);
+        [body.data.orgId,tag,row.name,row.serial||null,row.categoryId,row.locationId,row.departmentId,row.model||null,row.brand||null,row.cost,row.purchaseDate,row.condition]);
       imported++;
     }
     await client.query('COMMIT');
