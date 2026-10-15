@@ -207,3 +207,17 @@ ON CONFLICT DO NOTHING;
 ALTER TABLE assets ADD COLUMN IF NOT EXISTS department_id uuid;
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='assets_department_fk') THEN ALTER TABLE assets ADD CONSTRAINT assets_department_fk FOREIGN KEY(department_id) REFERENCES locations(id) ON DELETE SET NULL; END IF; END $$;
 CREATE INDEX IF NOT EXISTS assets_org_department ON assets(org_id,department_id);
+
+CREATE TABLE IF NOT EXISTS asset_import_batches(
+  id text PRIMARY KEY,
+  org_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  file_name text,
+  total_rows integer NOT NULL DEFAULT 0,
+  imported_rows integer NOT NULL DEFAULT 0,
+  error_rows integer NOT NULL DEFAULT 0,
+  status text NOT NULL DEFAULT 'completed' CHECK(status IN ('completed','rolled_back')),
+  asset_ids jsonb NOT NULL DEFAULT '[]',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  rolled_back_at timestamptz
+);
+CREATE INDEX IF NOT EXISTS asset_import_batches_org_created ON asset_import_batches(org_id,created_at DESC);
