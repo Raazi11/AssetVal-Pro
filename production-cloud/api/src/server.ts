@@ -133,19 +133,75 @@ const assetInput=z.object({
   depreciationMethod:z.enum(['straight_line','declining_balance','sum_of_years_digits']).default('straight_line'),purchaseDate:z.string().nullable().default(null),status:z.string().default('Active')
 });
 app.get('/v1/assets',async(req,res)=>{
-  const q=req.query as {orgId?:string;categoryId?:string;locationId?:string};
+  const q=req.query as {orgId?:string;search?:string;categoryId?:string;locationId?:string;departmentId?:string;custodianId?:string;vendorId?:string;status?:string};
   if(!q.orgId || !z.string().uuid().safeParse(q.orgId).success)return res.code(400).send({error:'orgId must be a UUID'});
+  const uuid=(v?:string)=>v&&z.string().uuid().safeParse(v).success?v:null;
   try{
-    const r=await pool.query(`SELECT a.id,a.tag,a.asset_name AS "assetName",a.serial,a.category_id AS "categoryId",c.name AS "categoryName",
-      c.parent_id AS "categoryParentId",a.location_id AS "locationId",l.name AS "locationName",a.custodian_id AS "custodianId",cu.name AS "custodianName",
-      a.vendor_id AS "vendorId",v.name AS "vendorName",a.model,a.cost,a.useful_life_years AS "usefulLifeYears",a.salvage_value AS "salvageValue",
-      a.depreciation_method AS "depreciationMethod",a.purchase_date AS "purchaseDate",a.status
-      FROM assets a LEFT JOIN asset_categories c ON c.id=a.category_id LEFT JOIN locations l ON l.id=a.location_id
-      LEFT JOIN custodians cu ON cu.id=a.custodian_id LEFT JOIN vendors v ON v.id=a.vendor_id
-      WHERE a.org_id=$1 AND ($2::uuid IS NULL OR a.category_id=$2) AND ($3::uuid IS NULL OR a.location_id=$3)
-      ORDER BY lower(a.asset_name)`,[q.orgId,q.categoryId||null,q.locationId||null]);
+    const r=await pool.query(`
+      WITH RECURSIVE loc_tree AS (
+        SELECT id,org_id,parent_id,location_type,id AS department_id FROM locations WHERE org_id=$1 AND location_type='department'
+        UNION ALL
+        SELECT l.id,l.org_id,l.parent_id,l.location_type,t.department_id FROM locations l JOIN loc_tree t ON l.parent_id=t.id WHERE l.org_id=$1
+      )
+      SELECT a.id,a.tag,a.asset_name AS "assetName",a.serial,a.category_id AS "categoryId",c.name AS "categoryName",c.parent_id AS "categoryParentId",
+        a.location_id AS "locationId",l.name AS "locationName",lt.department_id AS "departmentId",dep.name AS "departmentName",
+        a.custodian_id AS "custodianId",cu.name AS "custodianName",a.vendor_id AS "vendorId",v.name AS "vendorName",
+        a.brand,a.model,a.cost,a.condition,a.useful_life_years AS "usefulLifeYears",a.salvage_value AS "salvageValue",
+        a.depreciation_method AS "depreciationMethod",a.purchase_date AS "purchaseDate",a.status,a.created_at AS "createdAt"
+      FROM assets a
+      LEFT JOIN asset_categories c ON c.id=a.category_id
+      LEFT JOIN locations l ON l.id=a.location_id
+      LEFT JOIN loc_tree lt ON lt.id=a.location_id
+      LEFT JOIN locations dep ON dep.id=lt.department_id
+      LEFT JOIN custodians cu ON cu.id=a.custodian_id
+      LEFT JOIN vendors v ON v.id=a.vendor_id
+      WHERE a.org_id=$1
+        AND ($2::text IS NULL OR a.tag ILIKE '%'||$2||'%' OR a.asset_name ILIKE '%'||$2||'%' OR COALESCE(a.serial,'') ILIKE '%'||$2||'%' OR COALESCE(a.brand,'') ILIKE '%'||$2||'%' OR COALESCE(a.model,'') ILIKE '%'||$2||'%')
+        AND ($3::uuid IS NULL OR a.category_id=$3)
+        AND ($4::uuid IS NULL OR a.location_id=$4)
+        AND ($5::uuid IS NULL OR lt.department_id=$5)
+        AND ($6::uuid IS NULL OR a.custodian_id=$6)
+        AND ($7::uuid IS NULL OR a.vendor_id=$7)
+        AND ($8::text IS NULL OR a.status=$8)
+      ORDER BY lower(a.asset_name),a.tag`,[q.orgId,q.search?.trim()||null,uuid(q.categoryId),uuid(q.locationId),uuid(q.departmentId),uuid(q.custodianId),uuid(q.vendorId),q.status?.trim()||null]);
     return r.rows;
   }catch{return res.code(500).send({error:'asset query failed'})}
+});
+
+const assetUpdate=assetInput.partial().omit({orgId:true});
+app.patch('/v1/assets/:id',async(req,res)=>{
+  const p=req.params as {id:string}; const body=req.body as any;
+  if(!z.string().uuid().safeParse(p.id).success || !body?.orgId || !z.string().uuid().safeParse(body.orgId).success)return res.code(400).send({error:'invalid asset or orgId'});
+  const parsed=assetUpdate.safeParse(body); if(!parsed.success)return res.code(400).send({error:parsed.error.flatten()});
+  const v=parsed.data; const fields:string[]=[]; const values:any[]=[p.id,body.orgId]; let n=3;
+  const map:any={tag:'tag',assetName:'asset_name',serial:'serial',categoryId:'category_id',brand:'brand',locationId:'location_id',custodianId:'custodian_id',vendorId:'vendor_id',model:'model',condition:'condition',cost:'cost',usefulLifeYears:'useful_life_years',salvageValue:'salvage_value',depreciationMethod:'depreciation_method',purchaseDate:'purchase_date',status:'status'};
+  for(const [k,val] of Object.entries(v)){if(map[k]){fields.push(`${map[k]}=${n++}`);values.push(val)}}
+  if(!fields.length)return res.code(400).send({error:'no changes'});
+  try{
+    const r=await pool.query(`UPDATE assets SET ${fields.join(',')} WHERE id=$1 AND org_id=$2 RETURNING id,tag,asset_name AS "assetName",serial,category_id AS "categoryId",location_id AS "locationId",custodian_id AS "custodianId",vendor_id AS "vendorId",brand,model,cost,condition,useful_life_years AS "usefulLifeYears",salvage_value AS "salvageValue",depreciation_method AS "depreciationMethod",purchase_date AS "purchaseDate",status`,values);
+    if(!r.rowCount)return res.code(404).send({error:'asset not found'});
+    await audit({orgId:body.orgId,actorId:null,action:'asset.updated',entity:'asset',entityId:p.id,metadata:{changes:v}});
+    return r.rows[0];
+  }catch{return res.code(409).send({error:'asset update failed; check references and unique tag'})}
+});
+
+function depreciationSnapshot(cost:number,salvage:number,life:number,purchaseDate:string|null,method:string){
+  const today=new Date(); const start=purchaseDate?new Date(purchaseDate):today;
+  const years=Math.max(0,Math.min(life,(today.getTime()-start.getTime())/(365.25*24*3600*1000)));
+  const depreciable=Math.max(0,cost-salvage); let dep=0;
+  if(method==='declining_balance'){const rate=life>0?2/life:0; dep=cost*(1-Math.pow(Math.max(0,1-rate),years));}
+  else if(method==='sum_of_years_digits'){const full=Math.ceil(years); const total=life*(life+1)/2; for(let y=1;y<=Math.min(full,life);y++) dep+=depreciable*((life-y+1)/total);}
+  else dep=depreciable*(life>0?Math.min(years/life,1):0);
+  dep=Math.max(0,Math.min(depreciable,dep)); return {yearsElapsed:years,accumulatedDepreciation:dep,bookValue:Math.max(salvage,cost-dep),annualDepreciation:life>0?depreciable/life:0};
+}
+app.get('/v1/assets/:id/depreciation',async(req,res)=>{
+  const p=req.params as {id:string}; const q=req.query as {orgId?:string};
+  if(!q.orgId || !z.string().uuid().safeParse(q.orgId).success || !z.string().uuid().safeParse(p.id).success)return res.code(400).send({error:'invalid asset or orgId'});
+  try{
+    const r=await pool.query(`SELECT id,tag,asset_name AS "assetName",cost,salvage_value AS "salvageValue",useful_life_years AS "usefulLifeYears",depreciation_method AS "depreciationMethod",purchase_date AS "purchaseDate" FROM assets WHERE id=$1 AND org_id=$2`,[p.id,q.orgId]);
+    if(!r.rowCount)return res.code(404).send({error:'asset not found'});
+    return {...r.rows[0],...depreciationSnapshot(Number(r.rows[0].cost),Number(r.rows[0].salvageValue),Number(r.rows[0].usefulLifeYears),r.rows[0].purchaseDate,r.rows[0].depreciationMethod)};
+  }catch{return res.code(500).send({error:'depreciation calculation failed'})}
 });
 app.get('/v1/assets/:id',async(req,res)=>{
   const p=req.params as {id:string}; const q=req.query as {orgId?:string};
